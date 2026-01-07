@@ -1,0 +1,327 @@
+================================================================================
+          NEW FIRMWARE TEST PROCEDURE (DETAILED)
+          Speed Limiter System - ESP32_SpeedLimiter_SRD_v1.ino
+================================================================================
+
+Document Information
+--------------------
+Date:            January 5th, 2026
+Firmware:         ESP32_SpeedLimiter_SRD_v1.ino
+Related SRD:      Software_Requirements_Document.txt
+Old Firmware Ref: ESP32_ADC2_IDF_G2.ino
+
+================================================================================
+0. SAFETY / DISCLAIMER
+================================================================================
+
+This firmware can affect vehicle acceleration behavior. Perform vehicle tests
+only in a controlled environment. Use proper isolation and ensure the relay
+wiring is correct (fail-safe: relay OFF should connect the real pedal).
+
+================================================================================
+1. TEST EQUIPMENT / PREREQUISITES
+================================================================================
+
+1.1 Required Hardware
+----------------------
+- ESP32-WROVER-E-N4R8 board with the speed-limiter relay/analog interface board
+- CAN transceiver connected to IO32/IO33 (and vehicle CAN/OBD connector)
+- RS232 adapter/level shifter connected to:
+  - ESP32 IO15 (TX) -> RS232 RX
+  - ESP32 IO34 (RX) -> RS232 TX
+  - Shared GND
+- Optional: USB cable for USB Serial monitoring
+- Multimeter or oscilloscope to measure PWM-filtered outputs O1/O2 (IO21/IO22)
+- Two potentiometers (Mode 1) connected to ADC inputs:
+  - POT1 input assumed IO25
+  - POT2 input assumed IO26
+  (If your hardware uses different pins, update POT1_PIN/POT2_PIN in firmware.)
+
+1.2 Required Tools
+-------------------
+- Serial terminal (PuTTY, TeraTerm, etc.) for:
+  - USB Serial (115200)
+  - RS232 Serial2 (default 115200; configurable)
+- Optional CAN tool (PCAN, CANable, or another MCU) for bench simulation
+
+1.3 Firmware Configuration Defaults
+------------------------------------
+- Speed limit: 40 km/h
+- Speed source: OBD-II (PID 0x0D) via CAN
+- OBD request interval: 100 ms (10 Hz)
+- CAN timeout safe state: 5 seconds -> relay OFF
+- Mode switch pin: IO13 (LOW = Mode 1 Manual, HIGH = Mode 2 Automatic)
+- Relay pin: IO23
+- Buzzer pin: IO14
+- Outputs: IO21/IO22 PWM (divider compensation enabled)
+
+================================================================================
+2. BENCH TESTS (NO VEHICLE)
+================================================================================
+
+2.1 TC-BOOT-001: Power-on Safe State
+-------------------------------------
+Goal: Verify fail-safe behavior at boot.
+Steps:
+1) Power the board.
+2) Measure IO23 (relay control).
+Expected:
+- IO23 is LOW immediately after boot (relay OFF).
+- `status` shows relay=OFF unless overridden.
+
+2.2 TC-COMM-001: USB Serial CLI
+--------------------------------
+Steps:
+1) Open USB Serial at 115200.
+2) Type: `help`
+3) Type: `status`
+Expected:
+- Commands are accepted.
+- `status` prints mode, speed validity, relay, configuration, and errors.
+
+2.3 TC-COMM-002: RS232 CLI
+---------------------------
+Steps:
+1) Connect RS232 adapter to IO15/IO34.
+2) Open RS232 terminal at 115200
+3) Type: `help`
+4) Type: `status`
+Expected:
+- Commands are accepted over RS232.
+
+2.4 TC-MODE-001: Mode Switch Detection (IO13)
+----------------------------------------------
+Steps:
+1) Force IO13 LOW (switch to GND).
+2) Run `status`.
+3) Force IO13 HIGH (release to pull-up).
+4) Run `status`.
+Expected:
+- IO13 LOW -> Mode1-Manual
+- IO13 HIGH -> Mode2-Automatic
+
+2.5 TC-IO-001: IO18 Behavior (mirror vs manual)
+------------------------------------------------
+Steps:
+1) Run: `io18 mirror off`
+2) Run: `io18 set 1`
+3) Verify IO18 is HIGH.
+4) Run: `io18 set 0`
+5) Verify IO18 is LOW.
+6) Run: `io18 mirror on`
+Expected:
+- IO18 follows manual state when mirror=off.
+- IO18 mirrors limiter state when mirror=on.
+
+2.6 TC-OUT-001: Output Divider Compensation Check (basic)
+----------------------------------------------------------
+Goal: Validate “internal x2 then divider /2” behavior at outputs.
+Steps (Mode 1 recommended):
+1) Put system in Mode1-Manual (IO13 LOW).
+2) Set potentiometer 1 voltage to ~0.350 V at IO25 input.
+3) Set potentiometer 2 voltage to ~0.700 V at IO26 input.
+4) Measure the resulting analog outputs at the board output test points
+   (after the board’s voltage divider, if applicable).
+Expected:
+- ECU/output side voltage matches approx 0.350V and 0.700V.
+Notes:
+- If you measure directly on the ESP32 PWM pin before the divider/filter,
+  you may see approx double (because firmware compensates for divider).
+
+================================================================================
+3. CAN SPEED INPUT TESTS (BENCH SIMULATION)
+================================================================================
+
+You can test CAN logic without a vehicle using a CAN tool/MCU to simulate:
+
+Option A: OBD Response Simulation (default firmware mode)
+---------------------------------------------------------
+Simulate CAN frames with:
+- ID: 0x7E8
+- Data: [len, 0x41, 0x0D, speed_kmh, ...]
+
+Option B: Broadcast Speed Mode (firmware set src=broadcast)
+-----------------------------------------------------------
+Set:
+  set src broadcast
+  set spd id 0x123
+  set spd idx 0
+Then send frames:
+- ID: 0x123
+- Data[0] = speed_kmh
+
+3.1 TC-CAN-001: Speed Reception and Validity
+---------------------------------------------
+Steps:
+1) Send speed frames at ~10Hz or faster.
+2) Run `status`.
+Expected:
+- Speed valid = YES
+- Speed age increases between frames and resets on new frame
+
+3.2 TC-CAN-002: CAN Timeout Safe State (5 seconds)
+---------------------------------------------------
+Steps:
+1) Send frames for 5+ seconds.
+2) Stop sending frames.
+3) Wait > 5 seconds.
+4) Run `status`.
+Expected:
+- Error flag includes ERR_CAN_TIMEOUT
+- Relay is forced OFF
+- Buzzer is OFF
+
+3.3 TC-CFG-001: Speed Calibration Factor/Offset
+------------------------------------------------
+Steps:
+1) Send raw speed = 40.
+2) Run: `set factor 1.10`
+3) Run: `set offset -2`
+4) Run `status`.
+Expected:
+- Calibrated speed = 40*1.10 - 2 = 42.0 km/h
+
+================================================================================
+4. FUNCTIONAL LIMITER TESTS (BENCH)
+================================================================================
+
+4.1 TC-LIM-001: Relay Activation at Speed Limit
+------------------------------------------------
+Steps:
+1) Ensure relay override is AUTO: `relay auto`
+2) Set limit to 40: `set limit 40`
+3) Send speed=39 -> verify relay OFF.
+4) Send speed=40 -> verify relay ON.
+Expected:
+- Relay turns ON when speed >= 40
+- Buzzer pattern becomes active when limiting
+
+4.2 TC-LIM-002: Relay Deactivation Below Speed Limit
+-----------------------------------------------------
+Steps:
+1) Send speed=40 (relay ON).
+2) Send speed=39 (relay OFF).
+Expected:
+- Relay OFF when speed < limit (strict SRD behavior).
+
+4.3 TC-OVR-001: Relay Override
+------------------------------
+Steps:
+1) Send speed=0 (below limit).
+2) Run: `relay on`
+3) Verify IO23 is HIGH.
+4) Run: `relay off`
+5) Verify IO23 is LOW.
+6) Run: `relay auto`
+Expected:
+- Relay can be forced ON/OFF, then returned to AUTO.
+
+================================================================================
+5. MODE 1 (MANUAL) TESTS
+================================================================================
+
+5.1 TC-M1-001: Potentiometer Tracking on Outputs
+-------------------------------------------------
+Steps:
+1) Set Mode1-Manual (IO13 LOW).
+2) Adjust pot inputs (IO25/IO26).
+3) Measure outputs at IO21/IO22 (or after filter).
+Expected:
+- Output voltages track pot changes.
+
+5.2 TC-M1-002: Default Values Fallback (350mV/700mV)
+-----------------------------------------------------
+Steps:
+1) Disconnect pot inputs (force near 0V).
+2) Keep Mode1-Manual.
+Expected:
+- Outputs fall back to ~0.350V and ~0.700V (ECU-level) behavior.
+
+5.3 TC-M1-003: Manual Mode Limiting
+------------------------------------
+Steps:
+1) In Mode1-Manual, send speed>=limit.
+Expected:
+- Relay ON, buzzer ON
+- Outputs remain equal to pot values
+
+================================================================================
+6. MODE 2 (AUTOMATIC) TESTS
+================================================================================
+
+6.1 TC-M2-001: Calibration Button Stores Defaults
+--------------------------------------------------
+Steps:
+1) Set Mode2-Automatic (IO13 HIGH).
+2) Ensure pedal is at rest.
+3) Press calibration button (IO4).
+4) Run `status`.
+Expected:
+- Defaults valid = YES
+- Defaults V1/V2 updated from pedal reading
+- Confirmation tones play
+
+6.2 TC-M2-002: Limiting Uses Stored Defaults
+---------------------------------------------
+Steps:
+1) Mode2-Automatic (IO13 HIGH).
+2) Ensure defaults are valid (calibrate if needed).
+3) Send speed below limit -> relay OFF.
+4) Send speed >= limit -> relay ON.
+Expected:
+- When relay ON, outputs become defaults_v1/defaults_v2.
+- Buzzer active.
+
+6.3 TC-M2-003: Calibration Stability Guard
+-------------------------------------------
+Steps:
+1) While pressing pedal slightly or moving it during calibration,
+   press IO4 to calibrate.
+Expected:
+- Calibration rejected with message "not stable".
+
+================================================================================
+7. VEHICLE TEST (CONTROLLED)
+================================================================================
+
+7.1 Pre-drive Checklist
+------------------------
+- Confirm relay wiring: relay OFF must connect real pedal to ECU (fail-safe).
+- Confirm buzzer on IO14.
+- Confirm speed readings match vehicle (use `status`).
+- Set speed calibration factor/offset if needed.
+- Calibrate Mode2 defaults with pedal at rest.
+
+7.2 Drive Test Sequence
+------------------------
+1) Start in Mode2-Automatic.
+2) Drive slowly and observe speed in `status` or logs.
+3) Approach the speed limit (default 40 km/h).
+Expected:
+- At speed >= limit, relay activates, buzzer sounds, acceleration is limited.
+4) Reduce speed below limit.
+Expected:
+- Relay deactivates, buzzer stops, pedal control returns.
+
+7.3 Failure / Safety Tests (Only if safe to do)
+------------------------------------------------
+- Temporarily block CAN speed messages (disconnect CAN) and confirm after 5s:
+  relay turns OFF (safe state).
+
+================================================================================
+8. DIFFERENCES HIGHLIGHT (OLD vs NEW)
+================================================================================
+
+- NEW firmware supports Mode1+Mode2; old firmware was Mode2 only.
+- NEW firmware uses SRD pinout (APS IO39/IO36, buzzer IO14, relay IO23, RS232).
+- NEW firmware adds RS232 CLI and configuration persistence for speed limit and
+  calibration factor.
+- NEW firmware adds watchdog + CAN timeout safe state.
+- NEW firmware avoids blocking delays inside CAN callback (old firmware did heavy
+  work in the callback).
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+

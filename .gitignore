@@ -1,0 +1,36 @@
+# PlatformIO Build Files
+.pio/
+.vscode/.browse.c++
+.vscode/.browse.vc.db
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+
+# PlatformIO Cache
+.platformio/
+
+# Build Artifacts
+*.bin
+*.elf
+*.hex
+*.map
+*.uf2
+
+# IDE Files
+*.swp
+*.swo
+*.tmp
+
+# OS Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Backup Files
+*~
+*.bak
+
