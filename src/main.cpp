@@ -149,6 +149,8 @@ static float out_v2 = DEFAULT_SIGNAL_S2_V;
 // Limiter state
 static bool limiting = false;
 static uint16_t captured_pedal_avg_mv = 0;
+static float captured_pedal_v1 = DEFAULT_SIGNAL_S1_V; // APS1 value when limit was detected
+static float captured_pedal_v2 = DEFAULT_SIGNAL_S2_V; // APS2 value when limit was detected
 static float throttle_factor = 1.0f; // 1.0 = pass-through, <1 reduces APS outputs
 static uint32_t last_control_ms = 0;
 
@@ -436,6 +438,9 @@ void loop() {
     // Not limiting yet: wait until speed reaches the threshold.
     if (spd >= speed_limit_kmh) {
       limiting = true;
+      // Capture actual APS input values at the moment limit is detected
+      captured_pedal_v1 = pedal_v1;
+      captured_pedal_v2 = pedal_v2;
       captured_pedal_avg_mv = mvFromVolts((pedal_v1 + pedal_v2) * 0.5f);
       throttle_factor = 1.0f; // at threshold: output == input
       last_control_ms = now;
@@ -462,23 +467,52 @@ void loop() {
         last_control_ms = now;
 
         float err = (float)spd - (float)speed_limit_kmh;
-        if (fabsf(err) > SPEED_DEADBAND_KMH) {
-          // err > 0 => too fast => reduce factor
-          // err < 0 => too slow => increase factor (up to 1.0)
-          throttle_factor -= err * FACTOR_RATE_PER_KMH_PER_S * dt_s;
+        
+        // Improved control logic to prevent oscillation:
+        // - When speed is significantly over limit, reduce throttle more aggressively
+        // - When speed drops below limit, increase throttle more slowly to prevent overshoot
+        // - Use asymmetric response: faster reduction, slower increase
+        if (err > SPEED_DEADBAND_KMH) {
+          // Too fast: reduce throttle more aggressively
+          float reduction_rate = FACTOR_RATE_PER_KMH_PER_S * 1.5f; // 50% faster reduction
+          throttle_factor -= err * reduction_rate * dt_s;
+          throttle_factor = clampf(throttle_factor, 0.0f, 1.0f);
+        } else if (err < -SPEED_DEADBAND_KMH) {
+          // Too slow: increase throttle more slowly to prevent overshoot
+          float increase_rate = FACTOR_RATE_PER_KMH_PER_S * 0.4f; // 60% slower increase
+          throttle_factor -= err * increase_rate * dt_s; // err is negative, so this increases
           throttle_factor = clampf(throttle_factor, 0.0f, 1.0f);
         }
+        // If within deadband, maintain current throttle_factor
       }
     }
   }
 
   // Always generate outputs (keeps relay transitions smooth)
-  float v1 = pedal_v1 * throttle_factor;
-  float v2 = pedal_v2 * throttle_factor;
-
-  // Floor to safe minimums (avoid going below typical idle voltages)
-  if (v1 < DEFAULT_SIGNAL_S1_V) v1 = DEFAULT_SIGNAL_S1_V;
-  if (v2 < DEFAULT_SIGNAL_S2_V) v2 = DEFAULT_SIGNAL_S2_V;
+  float v1, v2;
+  
+  if (limiting) {
+    // When limiting: use captured APS values as base, then apply throttle_factor
+    // This ensures we use the actual APS input values from when limit was detected
+    // When throttle_factor = 1.0, output equals captured input (as requested)
+    v1 = captured_pedal_v1 * throttle_factor;
+    v2 = captured_pedal_v2 * throttle_factor;
+    
+    // Floor to safe minimums: use higher of defaults or 30% of captured values
+    // This prevents going too low while respecting the captured pedal position
+    float min_v1 = (captured_pedal_v1 * 0.3f > DEFAULT_SIGNAL_S1_V) ? captured_pedal_v1 * 0.3f : DEFAULT_SIGNAL_S1_V;
+    float min_v2 = (captured_pedal_v2 * 0.3f > DEFAULT_SIGNAL_S2_V) ? captured_pedal_v2 * 0.3f : DEFAULT_SIGNAL_S2_V;
+    if (v1 < min_v1) v1 = min_v1;
+    if (v2 < min_v2) v2 = min_v2;
+  } else {
+    // Not limiting: pass-through with current pedal values
+    v1 = pedal_v1 * throttle_factor;
+    v2 = pedal_v2 * throttle_factor;
+    
+    // Floor to safe minimums (avoid going below typical idle voltages)
+    if (v1 < DEFAULT_SIGNAL_S1_V) v1 = DEFAULT_SIGNAL_S1_V;
+    if (v2 < DEFAULT_SIGNAL_S2_V) v2 = DEFAULT_SIGNAL_S2_V;
+  }
 
   out_v1 = v1;
   out_v2 = v2;
