@@ -4,7 +4,7 @@
 // BUILD_TEST_LOGGER = 0  -> Speed Limiter firmware (default)
 // BUILD_TEST_LOGGER = 1  -> Logger firmware (see src/test_logger_fw.h)
 #ifndef BUILD_TEST_LOGGER
-#define BUILD_TEST_LOGGER 1
+#define BUILD_TEST_LOGGER 0
 #endif
 
 #if BUILD_TEST_LOGGER
@@ -91,15 +91,6 @@ static const int SDPS2_PIN = 22;   // IO22 - PWM output
 // =============================================================================
 static const uint32_t CAN_BAUD = 500000;
 
-// =============================================================================
-// Relay drive polarity
-// =============================================================================
-// Many relay modules are "active-low" (IN=0 energizes relay).
-// Set this to 0 if your hardware is active-high.
-#ifndef RELAY_ACTIVE_LOW
-#define RELAY_ACTIVE_LOW 1
-#endif
-
 // OBD-II speed PID request defaults (PID 0x0D)
 static const uint16_t OBD_REQ_ID = 0x7DF;
 static const uint8_t OBD_PID_SPEED = 0x0D;
@@ -109,7 +100,6 @@ static const uint32_t OBD_REQ_INTERVAL_MS = 100; // 10 Hz
 static const uint32_t SPEED_TIMEOUT_MS = 500;
 
 // Preferences
-
 static const char *PREF_NS = "speedLimiter";
 static const char *PREF_KEY_SL = "sl"; // speed limit in km/h
 static const uint16_t SPEED_LIMIT_DEFAULT_KMH = 40;
@@ -120,6 +110,10 @@ static const float PEDAL_SCALE = (69.6f / 47.5f);
 // Output divider compensation: to generate 1V ECU-output, generate 2V internally
 static const float OUTPUT_DIVIDER_GAIN = 2.0f;
 
+// Minimum safe ECU-level values (floor)
+static const float DEFAULT_SIGNAL_S1_V = 0.350f;
+static const float DEFAULT_SIGNAL_S2_V = 0.700f;
+
 // PWM settings
 static const uint32_t PWM_FREQ_HZ = 5000;
 static const ledc_timer_bit_t PWM_RESOLUTION = LEDC_TIMER_10_BIT; // 0..1023
@@ -127,13 +121,9 @@ static const uint32_t PWM_MAX_DUTY = 1023;
 
 // Limiter behavior
 static const uint16_t PEDAL_RELEASE_MARGIN_MV = 100; // ~100 mV below captured -> release relay
-static const uint32_t PEDAL_TIMEOUT_MS = 100;        // consider APS invalid if not updated within this window
 static const uint32_t CONTROL_INTERVAL_MS = 50;
 static const float SPEED_DEADBAND_KMH = 0.3f;
 static const float FACTOR_RATE_PER_KMH_PER_S = 0.06f; // tune to your vehicle
-
-// USB status streaming (always on for debugging)
-static const uint32_t USB_STREAM_INTERVAL_MS = 200;
 
 // =============================================================================
 // Globals
@@ -148,33 +138,23 @@ static bool adc1_ok = false;
 
 static uint16_t speed_limit_kmh = SPEED_LIMIT_DEFAULT_KMH;
 
-// Latest measured APS inputs
-static float pedal_adc_v1 = 0.0f;      // raw ADC-pin volts (GPIO-level)
-static float pedal_adc_v2 = 0.0f;      // raw ADC-pin volts (GPIO-level)
-static float pedal_v1 = 0.0f;          // ECU-level volts (after PEDAL_SCALE)
-static float pedal_v2 = 0.0f;          // ECU-level volts (after PEDAL_SCALE)
-static uint32_t pedal_last_good_ms = 0;
+// Latest measured APS inputs (ECU-level volts)
+static float pedal_v1 = DEFAULT_SIGNAL_S1_V;
+static float pedal_v2 = DEFAULT_SIGNAL_S2_V;
 
 // Latest generated outputs (ECU-level volts)
-static float out_v1 = 0.0f;
-static float out_v2 = 0.0f;
-static float out_applied_v1 = 0.0f; // ECU-level volts actually applied after scaling/clamp
-static float out_applied_v2 = 0.0f;
+static float out_v1 = DEFAULT_SIGNAL_S1_V;
+static float out_v2 = DEFAULT_SIGNAL_S2_V;
 
 // Limiter state
 static bool limiting = false;
 static uint16_t captured_pedal_avg_mv = 0;
-static float captured_v1 = 0.0f;     // APS1 captured (ECU-level volts) at the moment we hit the limit
-static float captured_v2 = 0.0f;     // APS2 captured (ECU-level volts) at the moment we hit the limit
-static float throttle_factor = 1.0f; // Scale applied to captured_v1/v2 (1.0 == captured)
+static float throttle_factor = 1.0f; // 1.0 = pass-through, <1 reduces APS outputs
 static uint32_t last_control_ms = 0;
 
 // USB CLI buffer
 static char cli_buf[32];
 static uint8_t cli_len = 0;
-
-// USB status streaming
-static uint32_t usb_stream_last_ms = 0;
 
 // =============================================================================
 // Helpers
@@ -186,19 +166,7 @@ static float clampf(float x, float lo, float hi) {
 }
 
 static void setRelayActive(bool active) {
-#if RELAY_ACTIVE_LOW
-  digitalWrite(RELAY_PIN, active ? LOW : HIGH);
-#else
   digitalWrite(RELAY_PIN, active ? HIGH : LOW);
-#endif
-}
-
-static inline bool relayIsActivePin() {
-#if RELAY_ACTIVE_LOW
-  return (digitalRead(RELAY_PIN) == LOW);
-#else
-  return (digitalRead(RELAY_PIN) == HIGH);
-#endif
 }
 
 static inline bool speedValid(uint32_t now_ms) {
@@ -212,11 +180,6 @@ static inline uint16_t mvFromVolts(float v) {
   float mv = v * 1000.0f;
   if (mv > 65535.0f) mv = 65535.0f;
   return (uint16_t)(mv + 0.5f);
-}
-
-static inline bool pedalValid(uint32_t now_ms) {
-  if (pedal_last_good_ms == 0) return false;
-  return (now_ms - pedal_last_good_ms) <= PEDAL_TIMEOUT_MS;
 }
 
 // =============================================================================
@@ -247,19 +210,10 @@ static float readVoltageAdc1(adc1_channel_t ch) {
 }
 
 static void samplePedal() {
-  float a1 = readVoltageAdc1(APS1_CH);
-  float a2 = readVoltageAdc1(APS2_CH);
-
-  // Keep last raw readings (for logging)
-  if (!isnan(a1)) pedal_adc_v1 = a1;
-  if (!isnan(a2)) pedal_adc_v2 = a2;
-
-  // Only update ECU-level values when BOTH channels are valid (keeps channels aligned)
-  if (!isnan(a1) && !isnan(a2)) {
-    pedal_v1 = a1 * PEDAL_SCALE;
-    pedal_v2 = a2 * PEDAL_SCALE;
-    pedal_last_good_ms = millis();
-  }
+  float aps1 = readVoltageAdc1(APS1_CH);
+  float aps2 = readVoltageAdc1(APS2_CH);
+  if (!isnan(aps1)) pedal_v1 = aps1 * PEDAL_SCALE;
+  if (!isnan(aps2)) pedal_v2 = aps2 * PEDAL_SCALE;
 }
 
 // =============================================================================
@@ -328,25 +282,8 @@ static void outputVoltagesInternal(float internal_v1, float internal_v2) {
 
 static void outputEcuVoltages(float ecu_v1, float ecu_v2) {
   float max_ecu_v = 3.3f / OUTPUT_DIVIDER_GAIN;
-  // Clamp to >=0 first
-  ecu_v1 = clampf(ecu_v1, 0.0f, 1000.0f);
-  ecu_v2 = clampf(ecu_v2, 0.0f, 1000.0f);
-
-  // IMPORTANT: If we exceed the max, scale BOTH channels together to preserve their ratio.
-  // This avoids cases where both saturate to the same value and the ECU flags implausible APS.
-  float mx = fmaxf(ecu_v1, ecu_v2);
-  if (mx > max_ecu_v && mx > 0.0f) {
-    float s = max_ecu_v / mx;
-    ecu_v1 *= s;
-    ecu_v2 *= s;
-  }
-
   ecu_v1 = clampf(ecu_v1, 0.0f, max_ecu_v);
   ecu_v2 = clampf(ecu_v2, 0.0f, max_ecu_v);
-
-  // Store applied values for logging
-  out_applied_v1 = ecu_v1;
-  out_applied_v2 = ecu_v2;
 
   float internal_v1 = ecu_v1 * OUTPUT_DIVIDER_GAIN;
   float internal_v2 = ecu_v2 * OUTPUT_DIVIDER_GAIN;
@@ -446,39 +383,6 @@ static void handleUsbCli() {
   }
 }
 
-static void usbStatusStreamUpdate(uint32_t now_ms, bool spd_ok, uint16_t spd_kmh) {
-  if ((uint32_t)(now_ms - usb_stream_last_ms) < USB_STREAM_INTERVAL_MS) return;
-  usb_stream_last_ms = now_ms;
-
-  bool ped_ok = pedalValid(now_ms);
-  bool relay_on = relayIsActivePin();
-  int relay_pin = digitalRead(RELAY_PIN);
-
-  // Approx duty (PWM mode) based on ECU output -> internal -> duty
-  float internal_v1 = out_applied_v1 * OUTPUT_DIVIDER_GAIN;
-  float internal_v2 = out_applied_v2 * OUTPUT_DIVIDER_GAIN;
-  uint32_t duty1 = (uint32_t)(clampf(internal_v1, 0.0f, 3.3f) / 3.3f * (float)PWM_MAX_DUTY);
-  uint32_t duty2 = (uint32_t)(clampf(internal_v2, 0.0f, 3.3f) / 3.3f * (float)PWM_MAX_DUTY);
-
-  Serial.printf(
-    "STAT spd=%u sl=%u spd_ok=%u ped_ok=%u relay=%u rpin=%d lim=%u tf=%.3f "
-    "aps_adc=(%.3f,%.3f) aps_in=(%.3f,%.3f) cap=(%.3f,%.3f) out=(%.3f,%.3f) duty=(%lu,%lu)\r\n",
-    (unsigned)spd_kmh,
-    (unsigned)speed_limit_kmh,
-    spd_ok ? 1u : 0u,
-    ped_ok ? 1u : 0u,
-    relay_on ? 1u : 0u,
-    relay_pin,
-    limiting ? 1u : 0u,
-    throttle_factor,
-    pedal_adc_v1, pedal_adc_v2,
-    pedal_v1, pedal_v2,
-    captured_v1, captured_v2,
-    out_applied_v1, out_applied_v2,
-    (unsigned long)duty1, (unsigned long)duty2
-  );
-}
-
 // =============================================================================
 // Arduino entry points
 // =============================================================================
@@ -522,7 +426,6 @@ void loop() {
 
   bool spd_ok = speedValid(now);
   uint16_t spd = (uint16_t)g_speed_kmh;
-  bool ped_ok = pedalValid(now);
 
   if (!spd_ok || speed_limit_kmh == 0) {
     // Fail-safe: if speed is unknown, do NOT keep relay active.
@@ -532,20 +435,11 @@ void loop() {
   } else if (!limiting) {
     // Not limiting yet: wait until speed reaches the threshold.
     if (spd >= speed_limit_kmh) {
-      // Only arm limiter if we have a fresh pedal sample. Otherwise we could capture 0.0V.
-      if (ped_ok) {
-        limiting = true;
-        captured_v1 = pedal_v1;
-        captured_v2 = pedal_v2;
-        captured_pedal_avg_mv = mvFromVolts((captured_v1 + captured_v2) * 0.5f);
-        throttle_factor = 1.0f; // at threshold: output == captured APS values
-        last_control_ms = now;
-        setRelayActive(true);
-        Serial.printf("CAP spd=%u sl=%u cap=(%.3f,%.3f)\r\n", (unsigned)spd, (unsigned)speed_limit_kmh, captured_v1, captured_v2);
-      } else {
-        // No valid APS yet -> don't activate relay; keep waiting.
-        setRelayActive(false);
-      }
+      limiting = true;
+      captured_pedal_avg_mv = mvFromVolts((pedal_v1 + pedal_v2) * 0.5f);
+      throttle_factor = 1.0f; // at threshold: output == input
+      last_control_ms = now;
+      setRelayActive(true);
     } else {
       throttle_factor = 1.0f;
       setRelayActive(false);
@@ -575,40 +469,20 @@ void loop() {
           throttle_factor = clampf(throttle_factor, 0.0f, 1.0f);
         }
       }
-
-      // Safety: never command more than driver's current pedal (if driver eases a bit but
-      // hasn't crossed the release threshold yet).
-      if (ped_ok) {
-        float max_factor = 1.0f; // never exceed captured values
-        if (captured_v1 > 0.01f) max_factor = fminf(max_factor, pedal_v1 / captured_v1);
-        if (captured_v2 > 0.01f) max_factor = fminf(max_factor, pedal_v2 / captured_v2);
-        if (max_factor < 0.0f) max_factor = 0.0f;
-        throttle_factor = clampf(throttle_factor, 0.0f, max_factor);
-      } else {
-        throttle_factor = clampf(throttle_factor, 0.0f, 1.0f);
-      }
     }
   }
 
   // Always generate outputs (keeps relay transitions smooth)
-  float v1 = 0.0f;
-  float v2 = 0.0f;
-  if (!limiting) {
-    // Before limiting: outputs mirror pedal (for smooth takeover when relay turns ON)
-    v1 = pedal_v1;
-    v2 = pedal_v2;
-  } else {
-    // While limiting: outputs are the captured APS values adjusted up/down by throttle_factor
-    v1 = captured_v1 * throttle_factor;
-    v2 = captured_v2 * throttle_factor;
-  }
+  float v1 = pedal_v1 * throttle_factor;
+  float v2 = pedal_v2 * throttle_factor;
+
+  // Floor to safe minimums (avoid going below typical idle voltages)
+  if (v1 < DEFAULT_SIGNAL_S1_V) v1 = DEFAULT_SIGNAL_S1_V;
+  if (v2 < DEFAULT_SIGNAL_S2_V) v2 = DEFAULT_SIGNAL_S2_V;
 
   out_v1 = v1;
   out_v2 = v2;
   outputEcuVoltages(out_v1, out_v2);
-
-  // Debug stream
-  usbStatusStreamUpdate(now, spd_ok, spd);
 
   delay(1);
 }
