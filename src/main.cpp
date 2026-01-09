@@ -94,7 +94,7 @@ static const uint32_t CAN_BAUD = 500000;
 // OBD-II speed PID request defaults (PID 0x0D)
 static const uint16_t OBD_REQ_ID = 0x7DF;
 static const uint8_t OBD_PID_SPEED = 0x0D;
-static const uint32_t OBD_REQ_INTERVAL_MS = 100; // 10 Hz
+static const uint32_t OBD_REQ_INTERVAL_MS = 40; // 25 Hz - higher rate for accurate limit detection
 
 // Speed validity timeout (failsafe: relay OFF)
 static const uint32_t SPEED_TIMEOUT_MS = 500;
@@ -436,9 +436,11 @@ void loop() {
     setRelayActive(false);
   } else if (!limiting) {
     // Not limiting yet: wait until speed reaches the threshold.
+    // Sample pedal immediately before checking limit to capture exact values
+    samplePedal();
     if (spd >= speed_limit_kmh) {
       limiting = true;
-      // Capture actual APS input values at the moment limit is detected
+      // Capture actual APS input values at the exact moment limit is detected
       captured_pedal_v1 = pedal_v1;
       captured_pedal_v2 = pedal_v2;
       captured_pedal_avg_mv = mvFromVolts((pedal_v1 + pedal_v2) * 0.5f);
@@ -518,6 +520,7 @@ void loop() {
   out_v2 = v2;
   outputEcuVoltages(out_v1, out_v2);
 
+  // Small delay to prevent CPU spinning, but keep loop fast for responsive control
   delay(1);
 }
 
