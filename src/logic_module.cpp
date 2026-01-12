@@ -28,7 +28,10 @@ static bool limiting = false;
 static uint16_t captured_pedal_avg_mv = 0;
 static float captured_pedal_v1 = DEFAULT_SIGNAL_S1_V;
 static float captured_pedal_v2 = DEFAULT_SIGNAL_S2_V;
-static float throttle_factor = 1.0f; // 1.0 = pass-through, <1 reduces APS outputs
+static float limit_factor = 1.0f; // 1.0 = pass-through, <1 reduces APS outputs
+static uint16_t last_speed_kmh = 0;
+static uint32_t last_speed_update_ms = 0;
+static float speed_rate_kmh_s = 0.0f; // filtered d(speed)/dt
 static uint32_t last_control_ms = 0;
 
 // USB CLI buffer (only: SL=<kmh>)
@@ -103,6 +106,7 @@ static void logicTask(void *param) {
 
     bool spd_ok = SharedState_SpeedValid(now, SPEED_TIMEOUT_MS);
     uint16_t spd = (uint16_t)g_speed_kmh;
+    uint32_t spd_update_ms = g_speed_last_update_ms;
     uint16_t effective_limit_kmh = speed_limit_kmh;
     if (speed_limit_kmh > SPEED_LIMIT_ACTIVATION_OFFSET_KMH) {
       effective_limit_kmh = (uint16_t)(speed_limit_kmh - SPEED_LIMIT_ACTIVATION_OFFSET_KMH);
@@ -116,10 +120,24 @@ static void logicTask(void *param) {
     float aps2 = DEFAULT_SIGNAL_S2_V;
     SharedState_GetAps(&aps1, &aps2, nullptr);
 
+    // Update speed derivative when a NEW speed sample arrives (avoids 1ms loop quantization spikes)
+    if (spd_update_ms != 0 && spd_update_ms != last_speed_update_ms) {
+      if (last_speed_update_ms != 0 && spd_update_ms > last_speed_update_ms) {
+        float dt_s = (float)(spd_update_ms - last_speed_update_ms) / 1000.0f;
+        if (dt_s > 0.001f) {
+          float inst_rate = ((float)spd - (float)last_speed_kmh) / dt_s;
+          // Light low-pass filter (reduces jitter from integer km/h steps)
+          speed_rate_kmh_s = (speed_rate_kmh_s * 0.7f) + (inst_rate * 0.3f);
+        }
+      }
+      last_speed_kmh = spd;
+      last_speed_update_ms = spd_update_ms;
+    }
+
     if (!spd_ok || speed_limit_kmh == 0) {
       // Fail-safe: if speed is unknown, do NOT keep relay active.
       limiting = false;
-      throttle_factor = 1.0f;
+      limit_factor = 1.0f;
       setRelayActive(false);
     } else if (!limiting) {
       // Not limiting yet: wait until speed reaches the threshold.
@@ -128,11 +146,11 @@ static void logicTask(void *param) {
         captured_pedal_v1 = aps1;
         captured_pedal_v2 = aps2;
         captured_pedal_avg_mv = mvFromVolts((aps1 + aps2) * 0.5f);
-        throttle_factor = 1.0f; // at threshold: output == input
+        limit_factor = 1.0f; // at threshold: output == input
         last_control_ms = now;
         setRelayActive(true);
       } else {
-        throttle_factor = 1.0f;
+        limit_factor = 1.0f;
         setRelayActive(false);
       }
     } else {
@@ -143,30 +161,30 @@ static void logicTask(void *param) {
       // Also release when speed drops well below the effective limit (hysteresis).
       if (spd <= effective_release_kmh || (pedal_avg_mv + PEDAL_RELEASE_MARGIN_MV < captured_pedal_avg_mv)) {
         limiting = false;
-        throttle_factor = 1.0f;
+        limit_factor = 1.0f;
         setRelayActive(false);
       } else {
         setRelayActive(true);
 
-        // Adapt throttle_factor to keep speed near the threshold.
+        // SPEED LIMITER control (not cruise control):
+        // - Reduce factor quickly when overspeed is predicted.
+        // - Relax factor back slowly only when speed is safely under the limit AND not rising.
         if ((uint32_t)(now - last_control_ms) >= CONTROL_INTERVAL_MS) {
           float dt_s = (float)(now - last_control_ms) / 1000.0f;
           last_control_ms = now;
 
-          float err = (float)spd - (float)effective_limit_kmh;
+          float spd_pred = (float)spd + speed_rate_kmh_s * LIMIT_SPEED_LOOKAHEAD_S;
+          float err_pred = spd_pred - (float)effective_limit_kmh;
 
-          // Asymmetric response:
-          // - Reduce throttle faster when over the limit
-          // - Increase throttle slower when under the limit (prevents oscillation)
-          if (err > SPEED_DEADBAND_KMH) {
-            float reduction_rate = FACTOR_RATE_PER_KMH_PER_S * 1.5f;
-            throttle_factor -= err * reduction_rate * dt_s;
-            throttle_factor = clampf(throttle_factor, 0.0f, 1.0f);
-          } else if (err < -SPEED_DEADBAND_KMH) {
-            float increase_rate = FACTOR_RATE_PER_KMH_PER_S * 0.4f;
-            throttle_factor -= err * increase_rate * dt_s; // err negative => increase
-            throttle_factor = clampf(throttle_factor, 0.0f, 1.0f);
+          if (err_pred > SPEED_DEADBAND_KMH) {
+            // Predicted overspeed -> cut fast
+            limit_factor -= err_pred * FACTOR_RATE_DOWN_PER_KMH_PER_S * dt_s;
+          } else if (err_pred < -LIMIT_RELAX_BAND_KMH && speed_rate_kmh_s <= LIMIT_RELAX_MAX_RISE_KMH_PER_S) {
+            // Safely under limit and not rising -> relax slowly
+            limit_factor += FACTOR_RATE_UP_PER_S * dt_s;
           }
+
+          limit_factor = clampf(limit_factor, 0.0f, 1.0f);
         }
       }
     }
@@ -174,18 +192,16 @@ static void logicTask(void *param) {
     // Compute desired outputs (ECU-level volts)
     float v1, v2;
     if (limiting) {
-      v1 = captured_pedal_v1 * throttle_factor;
-      v2 = captured_pedal_v2 * throttle_factor;
+      // IMPORTANT: output never higher than the real pedal (driver can always ease off)
+      v1 = aps1 * limit_factor;
+      v2 = aps2 * limit_factor;
 
-      float min_v1 =
-          (captured_pedal_v1 * 0.3f > DEFAULT_SIGNAL_S1_V) ? captured_pedal_v1 * 0.3f : DEFAULT_SIGNAL_S1_V;
-      float min_v2 =
-          (captured_pedal_v2 * 0.3f > DEFAULT_SIGNAL_S2_V) ? captured_pedal_v2 * 0.3f : DEFAULT_SIGNAL_S2_V;
-      if (v1 < min_v1) v1 = min_v1;
-      if (v2 < min_v2) v2 = min_v2;
+      // Safety floors (avoid invalid sensor lows)
+      if (v1 < DEFAULT_SIGNAL_S1_V) v1 = DEFAULT_SIGNAL_S1_V;
+      if (v2 < DEFAULT_SIGNAL_S2_V) v2 = DEFAULT_SIGNAL_S2_V;
     } else {
-      v1 = aps1 * throttle_factor;
-      v2 = aps2 * throttle_factor;
+      v1 = aps1;
+      v2 = aps2;
 
       if (v1 < DEFAULT_SIGNAL_S1_V) v1 = DEFAULT_SIGNAL_S1_V;
       if (v2 < DEFAULT_SIGNAL_S2_V) v2 = DEFAULT_SIGNAL_S2_V;
@@ -195,11 +211,15 @@ static void logicTask(void *param) {
 
     // Log current speed, APS inputs, and outputs
     int relay_pin_level = digitalRead(RELAY_PIN);
-    Serial.printf("Speed=%u km/h (SL=%u->%u off<=%u), Relay=%s (IO%d=%s), APS_in=(%.3fV, %.3fV), APS_out=(%.3fV, %.3fV)\r\n",
+    float spd_pred = (float)spd + speed_rate_kmh_s * LIMIT_SPEED_LOOKAHEAD_S;
+    Serial.printf("Speed=%u km/h (SL=%u->%u off<=%u pred=%.1f rate=%.1f F=%.2f), Relay=%s (IO%d=%s), APS_in=(%.3fV, %.3fV), APS_out=(%.3fV, %.3fV)\r\n",
                   spd,
                   (unsigned)speed_limit_kmh,
                   (unsigned)effective_limit_kmh,
                   (unsigned)effective_release_kmh,
+                  spd_pred,
+                  speed_rate_kmh_s,
+                  limit_factor,
                   limiting ? "ON" : "OFF",
                   RELAY_PIN,
                   relay_pin_level == HIGH ? "HIGH" : "LOW",
@@ -217,7 +237,10 @@ void LogicModule_Begin() {
   speed_limit_kmh = prefs.getUShort(PREF_KEY_SL, SPEED_LIMIT_DEFAULT_KMH);
 
   limiting = false;
-  throttle_factor = 1.0f;
+  limit_factor = 1.0f;
+  last_speed_kmh = 0;
+  last_speed_update_ms = 0;
+  speed_rate_kmh_s = 0.0f;
   last_control_ms = millis();
 
   Serial.printf("SpeedLimiter ready. SL=%u km/h\r\n", (unsigned)speed_limit_kmh);

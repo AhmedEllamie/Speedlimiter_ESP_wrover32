@@ -75,7 +75,7 @@ static const uint16_t SPEED_LIMIT_DEFAULT_KMH = 40;
 // Some vehicles show a higher speed on the dashboard than the CAN/OBD speed.
 // To compensate, we activate limiting earlier than the user-set limit:
 //   effective_limit = speed_limit_kmh - SPEED_LIMIT_ACTIVATION_OFFSET_KMH
-static const uint16_t SPEED_LIMIT_ACTIVATION_OFFSET_KMH = 5;
+static const uint16_t SPEED_LIMIT_ACTIVATION_OFFSET_KMH = 2;
 
 // Turn relay OFF once speed falls this far below the effective limit.
 // Example: SL=40, activation offset=5 => effective_limit=35.
@@ -101,7 +101,21 @@ static const float DEFAULT_SIGNAL_S2_V = 0.700f;
 static const uint16_t PEDAL_RELEASE_MARGIN_MV = 100; // ~100 mV below captured -> release relay
 static const uint32_t CONTROL_INTERVAL_MS = 50;
 static const float SPEED_DEADBAND_KMH = 0.3f;
-static const float FACTOR_RATE_PER_KMH_PER_S = 0.06f; // tune to your vehicle
+
+// -------------------------- Limiter controller tuning --------------------------
+// This is a SPEED LIMITER (not cruise control):
+// - Reduce throttle quickly when overspeed is predicted.
+// - Relax throttle back slowly only when speed is safely under the limit AND not rising.
+//
+// Units:
+// - factor is unitless (0..1)
+// - rates are "factor per second" or "factor per (km/h) per second"
+static const float LIMIT_SPEED_LOOKAHEAD_S = 0.35f;     // predict ahead using speed derivative
+static const float LIMIT_RELAX_BAND_KMH = 0.8f;         // must be under limit by this to relax
+static const float LIMIT_RELAX_MAX_RISE_KMH_PER_S = 0.2f; // do NOT relax if speed is rising faster than this
+
+static const float FACTOR_RATE_DOWN_PER_KMH_PER_S = 0.35f; // FAST reduction when overspeed
+static const float FACTOR_RATE_UP_PER_S = 0.08f;           // SLOW relax back toward 1.0
 
 // -----------------------------------------------------------------------------
 // Task rates
