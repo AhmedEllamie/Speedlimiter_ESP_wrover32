@@ -70,6 +70,14 @@ static const char *PREF_KEY_SL = "sl"; // speed limit in km/h
 static const uint16_t SPEED_LIMIT_DEFAULT_KMH = 40;
 
 // -----------------------------------------------------------------------------
+// Dashboard/CAN gap compensation
+// -----------------------------------------------------------------------------
+// Some vehicles show a higher speed on the dashboard than the CAN/OBD speed.
+// To compensate, we activate limiting earlier than the user-set limit:
+//   effective_limit = speed_limit_kmh - SPEED_LIMIT_ACTIVATION_OFFSET_KMH
+static const uint16_t SPEED_LIMIT_ACTIVATION_OFFSET_KMH = 5;
+
+// -----------------------------------------------------------------------------
 // Pedal scaling + safety floors
 // -----------------------------------------------------------------------------
 // SRD correction formula: Actual = ADC * (69.6 / 47.5)

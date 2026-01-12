@@ -103,6 +103,10 @@ static void logicTask(void *param) {
 
     bool spd_ok = SharedState_SpeedValid(now, SPEED_TIMEOUT_MS);
     uint16_t spd = (uint16_t)g_speed_kmh;
+    uint16_t effective_limit_kmh = speed_limit_kmh;
+    if (speed_limit_kmh > SPEED_LIMIT_ACTIVATION_OFFSET_KMH) {
+      effective_limit_kmh = (uint16_t)(speed_limit_kmh - SPEED_LIMIT_ACTIVATION_OFFSET_KMH);
+    }
 
     float aps1 = DEFAULT_SIGNAL_S1_V;
     float aps2 = DEFAULT_SIGNAL_S2_V;
@@ -115,7 +119,7 @@ static void logicTask(void *param) {
       setRelayActive(false);
     } else if (!limiting) {
       // Not limiting yet: wait until speed reaches the threshold.
-      if (spd >= speed_limit_kmh) {
+      if (spd >= effective_limit_kmh) {
         limiting = true;
         captured_pedal_v1 = aps1;
         captured_pedal_v2 = aps2;
@@ -144,7 +148,7 @@ static void logicTask(void *param) {
           float dt_s = (float)(now - last_control_ms) / 1000.0f;
           last_control_ms = now;
 
-          float err = (float)spd - (float)speed_limit_kmh;
+          float err = (float)spd - (float)effective_limit_kmh;
 
           // Asymmetric response:
           // - Reduce throttle faster when over the limit
@@ -183,6 +187,14 @@ static void logicTask(void *param) {
     }
 
     SharedState_SetDesiredOutputs(v1, v2);
+
+    // Log current speed, APS inputs, and outputs
+    Serial.printf("Speed=%u km/h (SL=%u->%u), Relay=%s, APS_in=(%.3fV, %.3fV), APS_out=(%.3fV, %.3fV)\r\n",
+                  spd,
+                  (unsigned)speed_limit_kmh,
+                  (unsigned)effective_limit_kmh,
+                  limiting ? "ON" : "OFF",
+                  aps1, aps2, v1, v2);
 
     vTaskDelay(pdMS_TO_TICKS(LOGIC_LOOP_INTERVAL_MS));
   }
