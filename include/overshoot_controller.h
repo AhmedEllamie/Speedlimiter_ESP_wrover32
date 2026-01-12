@@ -25,6 +25,7 @@ struct OvershootControllerState {
   float speed_rate_kmh_s = 0.0f;
 
   uint32_t last_control_ms = 0;
+  uint32_t activation_time_ms = 0; // When we first activated (for hold period)
 };
 
 struct OvershootControllerResult {

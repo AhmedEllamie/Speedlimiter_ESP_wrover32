@@ -32,6 +32,10 @@ static const float OC_CUT_RATE_FAST_PER_S = 2.20f;
 // A small margin avoids noise causing relay chatter.
 static const uint16_t OC_DRIVER_RELEASE_MARGIN_MV = 10;
 
+// Hold captured values for this long after activation before allowing cuts.
+// This prevents immediate reduction to default when activation happens.
+static const uint32_t OC_HOLD_AFTER_ACTIVATION_MS = 200;
+
 void OvershootController_Reset(OvershootControllerState *st, uint32_t now_ms) {
   if (!st) return;
 
@@ -42,6 +46,7 @@ void OvershootController_Reset(OvershootControllerState *st, uint32_t now_ms) {
   st->last_speed_update_ms = 0;
   st->speed_rate_kmh_s = 0.0f;
   st->last_control_ms = now_ms;
+  st->activation_time_ms = 0;
 }
 
 void OvershootController_Update(OvershootControllerState *st,
@@ -103,9 +108,14 @@ void OvershootController_Update(OvershootControllerState *st,
     // Not active yet: arm at (limit - margin).
     if (speed_kmh >= activation_kmh) {
       st->active = true;
-      st->out_v1 = in_v1; // capture exactly current inputs (rule #3)
-      st->out_v2 = in_v2;
+      // Capture exactly current inputs (rule #3) - use raw values, not clamped
+      // But ensure they're at least at default floor for safety
+      st->out_v1 = maxf(aps1_v, DEFAULT_SIGNAL_S1_V);
+      st->out_v2 = maxf(aps2_v, DEFAULT_SIGNAL_S2_V);
       st->last_control_ms = now_ms;
+      st->activation_time_ms = now_ms;
+      // Reset speed rate to avoid using stale acceleration data
+      st->speed_rate_kmh_s = 0.0f;
     } else {
       // Pass-through.
       st->out_v1 = in_v1;
@@ -128,17 +138,26 @@ void OvershootController_Update(OvershootControllerState *st,
 
         float cut_rate = 0.0f;
 
-        // Rule #6: if speed is at/below limit and not increasing -> hold (no change).
-        // Rule #4/#5: if still accelerating -> cut (fast or slow).
-        if (speed_kmh > target_limit_kmh) {
-          // Already over the limit -> ensure we cut (prevents "stuck above limit").
-          cut_rate = OC_CUT_RATE_FAST_PER_S;
-        } else if (st->speed_rate_kmh_s > OC_STABLE_MAX_RISE_KMH_PER_S) {
-          // Still accelerating -> cut based on how harsh acceleration is.
-          cut_rate = (st->speed_rate_kmh_s >= OC_HARSH_RISE_KMH_PER_S) ? OC_CUT_RATE_FAST_PER_S
-                                                                       : OC_CUT_RATE_SLOW_PER_S;
+        // Hold captured values for a short period after activation (prevents immediate cut to default).
+        uint32_t time_since_activation = (uint32_t)(now_ms - st->activation_time_ms);
+        if (time_since_activation < OC_HOLD_AFTER_ACTIVATION_MS) {
+          // Still in hold period -> no cutting yet
+          cut_rate = 0.0f;
         } else {
-          cut_rate = 0.0f; // hold
+          // Rule #6: if speed is at/below limit and not increasing -> hold (no change).
+          // Rule #4/#5: if still accelerating -> cut (fast or slow).
+          // Only cut if speed is actually rising (positive rate) or already over limit.
+          if (speed_kmh > target_limit_kmh) {
+            // Already over the limit -> ensure we cut (prevents "stuck above limit").
+            cut_rate = OC_CUT_RATE_FAST_PER_S;
+          } else if (st->speed_rate_kmh_s > OC_STABLE_MAX_RISE_KMH_PER_S) {
+            // Still accelerating (positive rate) -> cut based on how harsh acceleration is.
+            cut_rate = (st->speed_rate_kmh_s >= OC_HARSH_RISE_KMH_PER_S) ? OC_CUT_RATE_FAST_PER_S
+                                                                         : OC_CUT_RATE_SLOW_PER_S;
+          } else {
+            // Speed is stable or decreasing -> hold the captured/edited values (rule #6)
+            cut_rate = 0.0f;
+          }
         }
 
         if (cut_rate > 0.0f && dt_s > 0.0f) {
