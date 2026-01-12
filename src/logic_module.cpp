@@ -107,6 +107,10 @@ static void logicTask(void *param) {
     if (speed_limit_kmh > SPEED_LIMIT_ACTIVATION_OFFSET_KMH) {
       effective_limit_kmh = (uint16_t)(speed_limit_kmh - SPEED_LIMIT_ACTIVATION_OFFSET_KMH);
     }
+    uint16_t effective_release_kmh = 0;
+    if (effective_limit_kmh > SPEED_LIMIT_DEACTIVATION_HYSTERESIS_KMH) {
+      effective_release_kmh = (uint16_t)(effective_limit_kmh - SPEED_LIMIT_DEACTIVATION_HYSTERESIS_KMH);
+    }
 
     float aps1 = DEFAULT_SIGNAL_S1_V;
     float aps2 = DEFAULT_SIGNAL_S2_V;
@@ -136,7 +140,8 @@ static void logicTask(void *param) {
       uint16_t pedal_avg_mv = mvFromVolts((aps1 + aps2) * 0.5f);
 
       // Release when driver eases pedal below captured position by ~100mV.
-      if (pedal_avg_mv + PEDAL_RELEASE_MARGIN_MV < captured_pedal_avg_mv) {
+      // Also release when speed drops well below the effective limit (hysteresis).
+      if (spd <= effective_release_kmh || (pedal_avg_mv + PEDAL_RELEASE_MARGIN_MV < captured_pedal_avg_mv)) {
         limiting = false;
         throttle_factor = 1.0f;
         setRelayActive(false);
@@ -189,11 +194,15 @@ static void logicTask(void *param) {
     SharedState_SetDesiredOutputs(v1, v2);
 
     // Log current speed, APS inputs, and outputs
-    Serial.printf("Speed=%u km/h (SL=%u->%u), Relay=%s, APS_in=(%.3fV, %.3fV), APS_out=(%.3fV, %.3fV)\r\n",
+    int relay_pin_level = digitalRead(RELAY_PIN);
+    Serial.printf("Speed=%u km/h (SL=%u->%u off<=%u), Relay=%s (IO%d=%s), APS_in=(%.3fV, %.3fV), APS_out=(%.3fV, %.3fV)\r\n",
                   spd,
                   (unsigned)speed_limit_kmh,
                   (unsigned)effective_limit_kmh,
+                  (unsigned)effective_release_kmh,
                   limiting ? "ON" : "OFF",
+                  RELAY_PIN,
+                  relay_pin_level == HIGH ? "HIGH" : "LOW",
                   aps1, aps2, v1, v2);
 
     vTaskDelay(pdMS_TO_TICKS(LOGIC_LOOP_INTERVAL_MS));
