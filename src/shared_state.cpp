@@ -6,6 +6,9 @@
 volatile uint8_t g_speed_kmh = 0;
 volatile uint32_t g_speed_last_update_ms = 0;
 
+volatile uint16_t g_rpm = 0;
+volatile uint32_t g_rpm_last_update_ms = 0;
+
 volatile float g_aps1_v = 0.0f;
 volatile float g_aps2_v = 0.0f;
 volatile uint32_t g_aps_last_update_ms = 0;
@@ -26,6 +29,21 @@ bool SharedState_SpeedValid(uint32_t now_ms, uint32_t timeout_ms) {
   uint32_t last = g_speed_last_update_ms;
   if (last == 0) return false;
   return (uint32_t)(now_ms - last) <= timeout_ms;
+}
+
+void SharedState_SetRpm(uint16_t rpm, uint32_t now_ms) {
+  g_rpm = rpm;
+  g_rpm_last_update_ms = now_ms;
+}
+
+bool SharedState_RpmValid(uint32_t now_ms, uint32_t timeout_ms) {
+  uint32_t last = g_rpm_last_update_ms;
+  if (last == 0) return false;
+  return (uint32_t)(now_ms - last) <= timeout_ms;
+}
+
+uint16_t SharedState_GetRpm() {
+  return g_rpm;
 }
 
 void SharedState_SetAps(float v1, float v2, uint32_t now_ms) {

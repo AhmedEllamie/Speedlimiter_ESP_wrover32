@@ -85,6 +85,8 @@ static void logicTask(void *param) {
     uint16_t spd = (uint16_t)g_speed_kmh;
     uint32_t spd_update_ms = g_speed_last_update_ms;
 
+    uint16_t rpm = SharedState_GetRpm();
+
     float aps1 = DEFAULT_SIGNAL_S1_V;
     float aps2 = DEFAULT_SIGNAL_S2_V;
     SharedState_GetAps(&aps1, &aps2, nullptr);
@@ -103,12 +105,13 @@ static void logicTask(void *param) {
     setRelayActive(oc.relay_active);
     SharedState_SetDesiredOutputs(oc.out_v1, oc.out_v2);
 
-    // Log current speed, APS inputs, outputs, and overshoot controller status.
+    // Log current speed, RPM, APS inputs, outputs, and overshoot controller status.
     int relay_pin_level = digitalRead(RELAY_PIN);
     Serial.printf(
-        "Speed=%u km/h (SL=%u act@%u rate=%.2f cut=%.2f/s), OC=%s, Relay=%s (IO%d=%s), APS_in=(%.3fV, %.3fV), "
+        "Speed=%u km/h RPM=%u (SL=%u act@%u rate=%.2f cut=%.2f/s), OC=%s, Relay=%s (IO%d=%s), APS_in=(%.3fV, %.3fV), "
         "APS_out=(%.3fV, %.3fV)\r\n",
         (unsigned)spd,
+        (unsigned)rpm,
         (unsigned)oc.target_limit_kmh,
         (unsigned)oc.activation_kmh,
         oc.speed_rate_kmh_s,

@@ -9,6 +9,10 @@
 extern volatile uint8_t g_speed_kmh;
 extern volatile uint32_t g_speed_last_update_ms;
 
+// CAN RPM (rpm) + timestamp (ms)
+extern volatile uint16_t g_rpm;
+extern volatile uint32_t g_rpm_last_update_ms;
+
 // Pedal inputs (APS1/APS2) at ECU-level volts + timestamp (ms)
 extern volatile float g_aps1_v;
 extern volatile float g_aps2_v;
@@ -23,6 +27,10 @@ extern volatile float g_sdps2_v;
 // -----------------------------------------------------------------------------
 void SharedState_SetSpeed(uint8_t kmh, uint32_t now_ms);
 bool SharedState_SpeedValid(uint32_t now_ms, uint32_t timeout_ms);
+
+void SharedState_SetRpm(uint16_t rpm, uint32_t now_ms);
+bool SharedState_RpmValid(uint32_t now_ms, uint32_t timeout_ms);
+uint16_t SharedState_GetRpm();
 
 void SharedState_SetAps(float v1, float v2, uint32_t now_ms);
 void SharedState_GetAps(float *v1, float *v2, uint32_t *last_ms);

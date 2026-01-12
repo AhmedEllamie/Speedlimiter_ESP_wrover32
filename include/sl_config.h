@@ -57,6 +57,7 @@ static const uint32_t CAN_BAUD = 500000;
 // OBD-II speed PID request defaults (PID 0x0D)
 static const uint16_t OBD_REQ_ID = 0x7DF;
 static const uint8_t OBD_PID_SPEED = 0x0D;
+static const uint8_t OBD_PID_RPM = 0x0C;
 static const uint32_t OBD_REQ_INTERVAL_MS = 40; // 25 Hz - higher rate for accurate limit detection
 
 // Speed validity timeout (failsafe: relay OFF)
