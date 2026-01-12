@@ -75,7 +75,7 @@ static const uint16_t SPEED_LIMIT_DEFAULT_KMH = 40;
 // Some vehicles show a higher speed on the dashboard than the CAN/OBD speed.
 // To compensate, we activate limiting earlier than the user-set limit:
 //   effective_limit = speed_limit_kmh - SPEED_LIMIT_ACTIVATION_OFFSET_KMH
-static const uint16_t SPEED_LIMIT_ACTIVATION_OFFSET_KMH = 2;
+static const uint16_t SPEED_LIMIT_ACTIVATION_OFFSET_KMH = 10;
 
 // Turn relay OFF once speed falls this far below the effective limit.
 // Example: SL=40, activation offset=5 => effective_limit=35.
