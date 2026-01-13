@@ -34,8 +34,8 @@
 
 #include "adc_module.h"
 #include "can_module.h"
-#include "logic_module.h"
 #include "pwm_module.h"
+#include "speed_controller_module.h"
 
 void setup() {
   Serial.begin(115200);
@@ -45,13 +45,13 @@ void setup() {
   AdcModule_Begin();
   PwmModule_Begin();
   CanModule_Begin();
-  LogicModule_Begin();
+  SpeedControllerModule_Begin();
 
   // Start module tasks
   CanModule_StartTask();
   AdcModule_StartTask();
   PwmModule_StartTask();
-  LogicModule_StartTask();
+  SpeedControllerModule_StartTask();
 }
 
 void loop() {
