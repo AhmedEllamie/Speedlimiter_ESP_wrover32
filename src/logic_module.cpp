@@ -108,12 +108,13 @@ static void logicTask(void *param) {
     // Log current speed, RPM, APS inputs, outputs, and overshoot controller status.
     int relay_pin_level = digitalRead(RELAY_PIN);
     Serial.printf(
-        "Speed=%u km/h RPM=%u (SL=%u act@%u rate=%.2f cut=%.2f/s), OC=%s, Relay=%s (IO%d=%s), APS_in=(%.3fV, %.3fV), "
+        "Speed=%u km/h RPM=%u (SL=%u act@%u off<=%u rate=%.2f cut=%.2f/s), OC=%s, Relay=%s (IO%d=%s), APS_in=(%.3fV, %.3fV), "
         "APS_out=(%.3fV, %.3fV)\r\n",
         (unsigned)spd,
         (unsigned)rpm,
         (unsigned)oc.target_limit_kmh,
         (unsigned)oc.activation_kmh,
+        (unsigned)oc.release_kmh,
         oc.speed_rate_kmh_s,
         oc.applied_cut_rate_per_s,
         oc.active ? "ON" : "OFF",

@@ -38,6 +38,7 @@ struct OvershootControllerResult {
 
   // For logging/telemetry.
   uint16_t activation_kmh = 0;
+  uint16_t release_kmh = 0;
   uint16_t target_limit_kmh = 0;
   float speed_rate_kmh_s = 0.0f;
   float applied_cut_rate_per_s = 0.0f;

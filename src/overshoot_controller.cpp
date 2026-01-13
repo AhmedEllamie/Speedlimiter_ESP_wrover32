@@ -70,6 +70,11 @@ void OvershootController_Update(OvershootControllerState *st,
   if (speed_limit_kmh > SPEED_LIMIT_ACTIVATION_OFFSET_KMH) {
     activation_kmh = (uint16_t)(speed_limit_kmh - SPEED_LIMIT_ACTIVATION_OFFSET_KMH);
   }
+  // Compute release threshold (activation - hysteresis). This prevents relay chatter.
+  uint16_t release_kmh = 0;
+  if (activation_kmh > SPEED_LIMIT_DEACTIVATION_HYSTERESIS_KMH) {
+    release_kmh = (uint16_t)(activation_kmh - SPEED_LIMIT_DEACTIVATION_HYSTERESIS_KMH);
+  }
 
   // Update speed derivative ONLY when a new speed sample arrives.
   if (speed_update_ms != 0 && speed_update_ms != st->last_speed_update_ms) {
@@ -91,6 +96,7 @@ void OvershootController_Update(OvershootControllerState *st,
   out->out_v1 = in_v1;
   out->out_v2 = in_v2;
   out->activation_kmh = activation_kmh;
+  out->release_kmh = release_kmh;
   out->target_limit_kmh = target_limit_kmh;
   out->speed_rate_kmh_s = st->speed_rate_kmh_s;
   out->applied_cut_rate_per_s = 0.0f;
@@ -122,14 +128,23 @@ void OvershootController_Update(OvershootControllerState *st,
       st->out_v2 = in_v2;
     }
   } else {
-    // Active: apply rule #7 (driver override) continuously.
-    float rel_margin_v = mvToVolts(OC_DRIVER_RELEASE_MARGIN_MV);
-    if ((in_v1 + rel_margin_v) < st->out_v1 || (in_v2 + rel_margin_v) < st->out_v2) {
+    // Speed-based release (requested): once speed is sufficiently below activation threshold, release relay.
+    if (speed_kmh <= release_kmh) {
       st->active = false;
       st->out_v1 = in_v1;
       st->out_v2 = in_v2;
       st->last_control_ms = now_ms;
-    } else {
+      st->activation_time_ms = 0;
+    }
+
+    // Active: apply rule #7 (driver override) continuously.
+    float rel_margin_v = mvToVolts(OC_DRIVER_RELEASE_MARGIN_MV);
+    if (st->active && ((in_v1 + rel_margin_v) < st->out_v1 || (in_v2 + rel_margin_v) < st->out_v2)) {
+      st->active = false;
+      st->out_v1 = in_v1;
+      st->out_v2 = in_v2;
+      st->last_control_ms = now_ms;
+    } else if (st->active) {
       // Keep relay active while limiting.
       // Apply output edits at a fixed interval.
       if ((uint32_t)(now_ms - st->last_control_ms) >= CONTROL_INTERVAL_MS) {
