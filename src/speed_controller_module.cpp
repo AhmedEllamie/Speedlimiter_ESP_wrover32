@@ -24,8 +24,12 @@ static const uint16_t SC_ACTIVATION_GAP_KMH = 10;
 // Low-pass filter for speed derivative.
 static const float SC_SPEED_RATE_LPF_ALPHA = 0.85f; // 0..1 (higher = more smoothing)
 
-// Minimum time between *meaningful* output adjustments (car response delay aware).
-static const uint32_t SC_MIN_ADJUST_INTERVAL_MS = 150;
+// Minimum time between *reductions* (car response delay aware).
+// User-requested: wait 400ms after each reduction before reducing again.
+static const uint32_t SC_CUT_INTERVAL_MS = 1200;
+
+// Minimum time between relax (increasing output back toward APS_in). Keep it faster than cuts.
+static const uint32_t SC_RELAX_INTERVAL_MS = 150;
 
 // Speed error bands to avoid dithering around SL.
 static const float SC_RELAX_BAND_KMH = 0.8f; // must be under SL by this to relax up
@@ -40,8 +44,11 @@ static const float SC_RATE_UP_PER_S = 0.07f;
 // Driver override: if APS_in drops below APS_out (with margin), release relay.
 static const uint16_t SC_DRIVER_RELEASE_MARGIN_MV = 20;
 
-// Hold outputs briefly after activation to avoid immediate “cut to floor” on entry.
-static const uint32_t SC_HOLD_AFTER_ACTIVATION_MS = 200;
+// Hold outputs after activation before allowing cuts. Keep at 0 so the first cut can happen early.
+static const uint32_t SC_HOLD_AFTER_ACTIVATION_MS = 0;
+
+// Clamp cut aggressiveness (prevents very large step drops).
+static const float SC_CUT_RATE_MAX_PER_S = 1.0f;
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -89,7 +96,8 @@ struct SpeedControllerState {
   float speed_rate_kmh_s;
 
   uint32_t last_control_ms;
-  uint32_t last_adjust_ms;
+  uint32_t last_cut_ms;
+  uint32_t last_relax_ms;
   uint32_t activation_ms;
 };
 
@@ -147,7 +155,8 @@ static void resetController(uint32_t now_ms) {
   st.last_speed_update_ms = 0;
   st.speed_rate_kmh_s = 0.0f;
   st.last_control_ms = now_ms;
-  st.last_adjust_ms = 0;
+  st.last_cut_ms = 0;
+  st.last_relax_ms = 0;
   st.activation_ms = 0;
 }
 
@@ -223,7 +232,10 @@ static void speedControllerStep(const LinkedInputs &in) {
     st.aps1_out_v = maxf(in.aps1_in_v, DEFAULT_SIGNAL_S1_V);
     st.aps2_out_v = maxf(in.aps2_in_v, DEFAULT_SIGNAL_S2_V);
     st.last_control_ms = in.sample_ms;
-    st.last_adjust_ms = in.sample_ms;
+    // Allow first cut immediately after activation (no extra waiting), but still
+    // enforce SC_CUT_INTERVAL_MS between subsequent cuts.
+    st.last_cut_ms = (in.sample_ms >= SC_CUT_INTERVAL_MS) ? (in.sample_ms - SC_CUT_INTERVAL_MS) : 0;
+    st.last_relax_ms = in.sample_ms;
     st.activation_ms = in.sample_ms;
     // Discard stale accel data and restart derivative baseline at activation.
     st.speed_rate_kmh_s = 0.0f;
@@ -250,8 +262,11 @@ static void speedControllerStep(const LinkedInputs &in) {
   uint32_t since_activation = (uint32_t)(in.sample_ms - st.activation_ms);
   if (since_activation < SC_HOLD_AFTER_ACTIVATION_MS) return;
 
-  // Only adjust outputs at a slower pace to account for drivetrain response delay.
-  bool allow_adjust = ((uint32_t)(in.sample_ms - st.last_adjust_ms) >= SC_MIN_ADJUST_INTERVAL_MS);
+  // Enforce timing:
+  // - Cuts (reductions) are limited to every SC_CUT_INTERVAL_MS.
+  // - Relax steps are limited to every SC_RELAX_INTERVAL_MS.
+  bool allow_cut = ((uint32_t)(in.sample_ms - st.last_cut_ms) >= SC_CUT_INTERVAL_MS);
+  bool allow_relax = ((uint32_t)(in.sample_ms - st.last_relax_ms) >= SC_RELAX_INTERVAL_MS);
 
   // Control objective: keep speed at exactly SL by trimming APS_out when speed rises,
   // and relaxing slowly back toward APS_in when safely under SL and not rising.
@@ -261,13 +276,14 @@ static void speedControllerStep(const LinkedInputs &in) {
   // Rule #6c: if speed is increasing -> reduce outputs.
   bool speed_rising = (rise_kmh_s > 0.05f);
 
-  if (allow_adjust && (speed_rising || speed_err_kmh > 0.0f)) {
+  if (allow_cut && (speed_rising || speed_err_kmh > 0.0f)) {
     float overspeed_kmh = (speed_err_kmh > 0.0f) ? speed_err_kmh : 0.0f;
     float pos_rise = (rise_kmh_s > 0.0f) ? rise_kmh_s : 0.0f;
 
     float cut_rate_per_s = (SC_RATE_DOWN_PER_KMH_PER_S * overspeed_kmh) + (SC_RATE_DOWN_PER_KMHPS_PER_S * pos_rise);
     // Ensure *some* cut when rising near the limit to prevent overshoot.
     if (cut_rate_per_s < 0.05f) cut_rate_per_s = 0.05f;
+    if (cut_rate_per_s > SC_CUT_RATE_MAX_PER_S) cut_rate_per_s = SC_CUT_RATE_MAX_PER_S;
 
     float scale = 1.0f - (cut_rate_per_s * dt_s);
     scale = clampf(scale, 0.0f, 1.0f);
@@ -275,8 +291,8 @@ static void speedControllerStep(const LinkedInputs &in) {
     st.aps1_out_v *= scale;
     st.aps2_out_v *= scale;
 
-    st.last_adjust_ms = in.sample_ms;
-  } else if (allow_adjust) {
+    st.last_cut_ms = in.sample_ms;
+  } else if (allow_relax) {
     // Rule #6e: calibrate/relax upward when we're safely under SL and not rising,
     // converging to "just enough" APS_out to hold speed near SL.
     bool safely_under = ((float)g_speed_limit_kmh - (float)in.speed_kmh) >= SC_RELAX_BAND_KMH;
@@ -288,8 +304,7 @@ static void speedControllerStep(const LinkedInputs &in) {
       st.aps2_out_v += (in.aps2_in_v - st.aps2_out_v) * k;
       if (st.aps1_out_v > in.aps1_in_v) st.aps1_out_v = in.aps1_in_v;
       if (st.aps2_out_v > in.aps2_in_v) st.aps2_out_v = in.aps2_in_v;
-
-      st.last_adjust_ms = in.sample_ms;
+      st.last_relax_ms = in.sample_ms;
     }
   }
 
