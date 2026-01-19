@@ -380,6 +380,8 @@ void LogicModule_Update(float speed_limit_kmh)
 
             bool overspeed = (speed_kmh > speed_limit_kmh);
             bool speed_falling = (accel_kmh_s < -SLOW_ACCEL_KMH_S);
+            float activation_kmh = speed_limit_kmh - SPEED_MARGIN_KMH;
+            if (activation_kmh < 0.0f) activation_kmh = 0.0f;
 
             // Full pedal release => immediate return to pass-through.
             if (pedalFullyReleased(aps_in_v1, aps_in_v2))
@@ -402,7 +404,6 @@ void LogicModule_Update(float speed_limit_kmh)
 
             // If we undershoot well below the activation threshold, release authority.
             // This prevents getting "stuck" at the minimum clamp when the accel estimate is noisy.
-            float activation_kmh = speed_limit_kmh - SPEED_MARGIN_KMH;
             float release_kmh = activation_kmh - OVERSHOOT_RELEASE_HYSTERESIS_KMH;
             if (release_kmh < 0.0f) release_kmh = 0.0f;
             if (speed_kmh <= release_kmh)
@@ -426,13 +427,14 @@ void LogicModule_Update(float speed_limit_kmh)
                 break;
             }
 
-            // If we are below the limit and decelerating, return authority to the driver.
-            if ((speed_kmh < speed_limit_kmh) && speed_falling)
+            // If we are below the activation threshold and decelerating, return authority to the driver.
+            // Debounce to avoid rapid PASS_THROUGH <-> OVERSHOOT_CONTROL chatter near the limit.
+            if ((speed_kmh <= activation_kmh) && speed_falling && time_in_state_ms >= MIN_STATE_TIME_MS)
             {
                 logStateTransitionReason(
                     state,
                     LimiterState::PASS_THROUGH,
-                    "below limit and decelerating",
+                    "below activation and decelerating",
                     speed_kmh,
                     speed_limit_kmh,
                     accel_kmh_s,
@@ -456,13 +458,6 @@ void LogicModule_Update(float speed_limit_kmh)
                 break;
             }
 
-            // Accel-based trimming (never increase in this state).
-            // If we're already above the limit, force at least a slow cut regardless of accel estimate.
-            applyAccelBasedDecay(accel_kmh_s, dt_s, overspeed /*force_slow_cut*/);
-            clampCmdToFloors();
-
-            SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
-
             // Transition to LIMIT_ACTIVE when we're at/near the limit and stable.
             // Use a tighter band (2 km/h instead of 5) and require stable acceleration to prevent oscillation.
             // Also require minimum time in OVERSHOOT_CONTROL to prevent rapid transitions.
@@ -470,7 +465,7 @@ void LogicModule_Update(float speed_limit_kmh)
             bool stable_accel = absf(accel_kmh_s) <= SLOW_ACCEL_KMH_S;
             bool not_increasing = (accel_kmh_s <= 0.0f);
             bool min_time_elapsed = time_in_state_ms >= MIN_STATE_TIME_MS; // Full debounce time for entry
-            
+
             if (!overspeed && near_limit && stable_accel && not_increasing && min_time_elapsed)
             {
                 logStateTransitionReason(
@@ -486,8 +481,17 @@ void LogicModule_Update(float speed_limit_kmh)
                               stable_accel ? 1 : 0,
                               not_increasing ? 1 : 0,
                               min_time_elapsed ? 1 : 0);
+                SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
                 state = LimiterState::LIMIT_ACTIVE;
+                break;
             }
+
+            // Accel-based trimming (never increase in this state).
+            // If we're already above the limit, force at least a slow cut regardless of accel estimate.
+            applyAccelBasedDecay(accel_kmh_s, dt_s, overspeed /*force_slow_cut*/);
+            clampCmdToFloors();
+
+            SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
             break;
         }
 
