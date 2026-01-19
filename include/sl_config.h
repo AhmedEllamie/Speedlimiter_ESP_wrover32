@@ -101,7 +101,7 @@ static const float DEFAULT_SIGNAL_S2_V = 0.700f;
 // -----------------------------------------------------------------------------
 static const uint16_t PEDAL_RELEASE_MARGIN_MV = 100; // ~100 mV below captured -> release relay
 static const uint32_t CONTROL_INTERVAL_MS = 50;
-static const float SPEED_DEADBAND_KMH = 0.3f;
+//static const float SPEED_DEADBAND_KMH = 0.3f;
 
 // -------------------------- Limiter controller tuning --------------------------
 // This is a SPEED LIMITER (not cruise control):

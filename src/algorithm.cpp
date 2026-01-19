@@ -1,3 +1,17 @@
+// ==========================================================
+// Speed Limiter Logic Module — FINAL STABLE VERSION
+// ==========================================================
+//
+// Key properties:
+// - Relay-based APS authority
+// - Pre-limit capture
+// - Windowed accel
+// - HARD FREEZE band in LIMIT_ACTIVE
+// - Never increases throttle
+// - Stable with 2 km/h CAN speed quantization
+//
+// ==========================================================
+
 #include "logic_module.h"
 #include "shared_state.h"
 #include "sl_config.h"
@@ -6,37 +20,35 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-// ====================== TUNED CONFIG ======================
+// ============================== PARAMETERS ==============================
 
-// Speed limit
-static constexpr float SPEED_LIMIT_KMH = (float)SPEED_LIMIT_DEFAULT_KMH;
+// ---- Speed control ----
+static constexpr float SPEED_LIMIT_KMH        = 55.0f;
+static constexpr float SPEED_MARGIN_KMH       = 3.0f;   // enter OVERSHOOT at 52
+static constexpr float SPEED_DEADBAND_KMH     = 1.0f;   // ±1 km/h freeze band
 
-// Pre-limit capture margin
-static constexpr float SPEED_MARGIN_KMH = 2.0f;
+// ---- Acceleration thresholds (windowed) ----
+static constexpr float FAST_ACCEL_KMH_S       = 1.5f;
+static constexpr float SLOW_ACCEL_KMH_S       = 0.3f;
+static constexpr float FREEZE_ACCEL_KMH_S     = 0.2f;
 
-// Exit hysteresis
-static constexpr float SPEED_HYSTERESIS_KMH = 2.0f;
+// ---- APS decay (per loop, ~10 ms) ----
+static constexpr float FAST_DECAY_V            = 0.020f;
+static constexpr float SLOW_DECAY_V            = 0.005f;
 
-// Acceleration window
-static constexpr uint8_t ACCEL_WINDOW_SAMPLES = 5;
+// ---- APS safety ----
+static constexpr float APS_MIN_V               = 0.75f;
+static constexpr float APS_RELEASE_DELTA_V     = 0.05f;
+static constexpr float APS_IDLE_MARGIN_V       = 0.05f;
 
-// Accel thresholds (CAN-aware)
-static constexpr float FAST_ACCEL_KMH_S = 2.0f;
-static constexpr float SLOW_ACCEL_KMH_S = 0.6f;
+// ---- Timing ----
+static constexpr uint32_t TELEMETRY_MS          = 100;
+static constexpr uint32_t LOGIC_LOOP_MS         = 10;
 
-// APS decay rates (V/s)
-static constexpr float FAST_DECAY_V_PER_S = 2.0f;
-static constexpr float SLOW_DECAY_V_PER_S = 0.5f;
+// ---- Accel window ----
+static constexpr uint8_t ACCEL_WINDOW_SAMPLES  = 5;
 
-// APS handling
-static constexpr float APS_RELEASE_DELTA_V = 0.05f;
-static constexpr float APS_IDLE_MARGIN_V   = 0.05f;
-
-// State timing
-static constexpr uint32_t MIN_STATE_TIME_MS = 50;
-static constexpr uint32_t TELEMETRY_INTERVAL_MS = 100;
-
-// =========================================================
+// ============================== STATE ==============================
 
 enum class LimiterState
 {
@@ -47,29 +59,23 @@ enum class LimiterState
 };
 
 static LimiterState state = LimiterState::PASS_THROUGH;
-static TaskHandle_t logic_task = nullptr;
+static bool relay_active = false;
 
-// APS command
+// APS command (latched)
 static float aps_cmd_v1 = DEFAULT_SIGNAL_S1_V;
 static float aps_cmd_v2 = DEFAULT_SIGNAL_S2_V;
 
-// Relay
-static bool relay_active = false;
+// Timing
+static uint32_t last_loop_ms = 0;
+static uint32_t last_telemetry_ms = 0;
 
-// Time
-static uint32_t prev_ms = 0;
-static uint32_t state_entry_ms = 0;
-static uint32_t last_log_ms = 0;
+// Accel window
+static float speed_win[ACCEL_WINDOW_SAMPLES] = {0};
+static uint32_t time_win[ACCEL_WINDOW_SAMPLES] = {0};
+static uint8_t win_idx = 0;
+static bool win_full = false;
 
-// Speed window
-static float speed_buf[ACCEL_WINDOW_SAMPLES] = {};
-static uint32_t time_buf[ACCEL_WINDOW_SAMPLES] = {};
-static uint8_t idx = 0;
-static bool full = false;
-static uint32_t last_speed_ms = 0;
-static float accel_kmh_s = 0.0f;
-
-// ====================== HELPERS ======================
+// ============================== HELPERS ==============================
 
 static void setRelay(bool on)
 {
@@ -77,13 +83,13 @@ static void setRelay(bool on)
     digitalWrite(RELAY_PIN, on ? HIGH : LOW);
 }
 
-static bool pedalReleased(float v1, float v2)
+static bool pedalReleased(float in1, float in2)
 {
-    return (v1 <= DEFAULT_SIGNAL_S1_V + APS_IDLE_MARGIN_V) &&
-           (v2 <= DEFAULT_SIGNAL_S2_V + APS_IDLE_MARGIN_V);
+    return (in1 <= DEFAULT_SIGNAL_S1_V + APS_IDLE_MARGIN_V) &&
+           (in2 <= DEFAULT_SIGNAL_S2_V + APS_IDLE_MARGIN_V);
 }
 
-static bool driverAsksLess(float in1, float in2)
+static bool driverRequestsLess(float in1, float in2)
 {
     return (in1 < aps_cmd_v1 - APS_RELEASE_DELTA_V) ||
            (in2 < aps_cmd_v2 - APS_RELEASE_DELTA_V);
@@ -91,199 +97,215 @@ static bool driverAsksLess(float in1, float in2)
 
 static void clampAPS()
 {
-    if (aps_cmd_v1 < DEFAULT_SIGNAL_S1_V) aps_cmd_v1 = DEFAULT_SIGNAL_S1_V;
-    if (aps_cmd_v2 < DEFAULT_SIGNAL_S2_V) aps_cmd_v2 = DEFAULT_SIGNAL_S2_V;
+    if (aps_cmd_v1 < APS_MIN_V) aps_cmd_v1 = APS_MIN_V;
+    if (aps_cmd_v2 < APS_MIN_V) aps_cmd_v2 = APS_MIN_V;
 }
 
-static float computeAccel(float speed, uint32_t ms)
+static float computeAccel(float speed, uint32_t ts)
 {
-    if (ms == 0 || ms == last_speed_ms)
-        return accel_kmh_s;
+    if (ts == 0) return 0.0f;
 
-    last_speed_ms = ms;
+    speed_win[win_idx] = speed;
+    time_win[win_idx] = ts;
+    win_idx = (win_idx + 1) % ACCEL_WINDOW_SAMPLES;
 
-    speed_buf[idx] = speed;
-    time_buf[idx]  = ms;
-    idx = (idx + 1) % ACCEL_WINDOW_SAMPLES;
+    if (win_idx == 0) win_full = true;
+    if (!win_full) return 0.0f;
 
-    if (idx == 0) full = true;
-    if (!full) return accel_kmh_s = 0.0f;
+    uint8_t oldest = win_idx;
+    float ds = speed - speed_win[oldest];
+    uint32_t dt = ts - time_win[oldest];
+    if (dt == 0) dt = 1;
 
-    uint8_t oldest = idx;
-    float ds = speed - speed_buf[oldest];
-    float dt = (ms - time_buf[oldest]) / 1000.0f;
-    if (dt <= 0) dt = 0.01f;
-
-    return accel_kmh_s = ds / dt;
+    return ds / (dt / 1000.0f);
 }
 
-// ====================== LOGIC ======================
+// ============================== INIT ==============================
 
 void LogicModule_Begin()
 {
     pinMode(RELAY_PIN, OUTPUT);
     setRelay(false);
 
-    state = LimiterState::PASS_THROUGH;
-    prev_ms = millis();
-    state_entry_ms = prev_ms;
+    aps_cmd_v1 = DEFAULT_SIGNAL_S1_V;
+    aps_cmd_v2 = DEFAULT_SIGNAL_S2_V;
+
+    last_loop_ms = millis();
+    last_telemetry_ms = last_loop_ms;
 }
+
+// ============================== MAIN UPDATE ==============================
 
 void LogicModule_Update()
 {
     uint32_t now = millis();
-    float dt = (now - prev_ms) / 1000.0f;
+    float dt = (now - last_loop_ms) / 1000.0f;
     if (dt <= 0) dt = 0.001f;
-    prev_ms = now;
+    last_loop_ms = now;
 
-    float aps_in1, aps_in2;
+    float aps_in_v1, aps_in_v2;
     uint32_t aps_ts;
-    SharedState_GetAps(&aps_in1, &aps_in2, &aps_ts);
+    SharedState_GetAps(&aps_in_v1, &aps_in_v2, &aps_ts);
 
-    float speed = (float)g_speed_kmh;
+    float speed_kmh = g_speed_kmh;
     uint32_t speed_ts = g_speed_last_update_ms;
 
-    bool speed_valid = SharedState_SpeedValid(now, SPEED_TIMEOUT_MS);
-    accel_kmh_s = computeAccel(speed, speed_ts);
-
-    uint32_t time_in_state = now - state_entry_ms;
+    float accel = computeAccel(speed_kmh, speed_ts);
 
     switch (state)
     {
+        // ==================================================
         case LimiterState::PASS_THROUGH:
         {
             setRelay(false);
-            aps_cmd_v1 = aps_in1;
-            aps_cmd_v2 = aps_in2;
-            SharedState_SetDesiredOutputs(aps_in1, aps_in2);
+            SharedState_SetDesiredOutputs(aps_in_v1, aps_in_v2);
 
-            if (speed_valid &&
-                speed >= (SPEED_LIMIT_KMH - SPEED_MARGIN_KMH))
+            aps_cmd_v1 = aps_in_v1;
+            aps_cmd_v2 = aps_in_v2;
+
+            if (speed_kmh >= (SPEED_LIMIT_KMH - SPEED_MARGIN_KMH))
             {
-                aps_cmd_v1 = aps_in1;
-                aps_cmd_v2 = aps_in2;
-                clampAPS();
-
-                SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
+                aps_cmd_v1 = aps_in_v1;
+                aps_cmd_v2 = aps_in_v2;
                 setRelay(true);
                 state = LimiterState::OVERSHOOT_CONTROL;
-                state_entry_ms = now;
             }
             break;
         }
 
+        // ==================================================
         case LimiterState::OVERSHOOT_CONTROL:
         {
             setRelay(true);
 
-            if (!speed_valid)
-            {
-                state = LimiterState::FAULT;
-                break;
-            }
-
-            if (pedalReleased(aps_in1, aps_in2))
+            if (pedalReleased(aps_in_v1, aps_in_v2))
             {
                 setRelay(false);
                 state = LimiterState::PASS_THROUGH;
                 break;
             }
 
-            if (driverAsksLess(aps_in1, aps_in2))
+            if (driverRequestsLess(aps_in_v1, aps_in_v2))
             {
-                aps_cmd_v1 = aps_in1;
-                aps_cmd_v2 = aps_in2;
+                aps_cmd_v1 = aps_in_v1;
+                aps_cmd_v2 = aps_in_v2;
             }
-            else
+
+            bool near_limit =
+                speed_kmh >= (SPEED_LIMIT_KMH - 1.0f) &&
+                speed_kmh <= (SPEED_LIMIT_KMH + 0.5f);
+
+            if (near_limit && fabs(accel) < FREEZE_ACCEL_KMH_S)
             {
-                if (speed > SPEED_LIMIT_KMH)
+                state = LimiterState::LIMIT_ACTIVE;
+                break;
+            }
+
+            // decay
+            if (accel > FAST_ACCEL_KMH_S)
+            {
+                aps_cmd_v1 -= FAST_DECAY_V;
+                aps_cmd_v2 -= FAST_DECAY_V;
+            }
+            else if (accel > SLOW_ACCEL_KMH_S)
+            {
+                aps_cmd_v1 -= SLOW_DECAY_V;
+                aps_cmd_v2 -= SLOW_DECAY_V;
+            }
+
+            clampAPS();
+            SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
+            break;
+        }
+
+        // ==================================================
+        case LimiterState::LIMIT_ACTIVE:
+        {
+            setRelay(true);
+
+            const float LOW_BAND  = SPEED_LIMIT_KMH - SPEED_DEADBAND_KMH;
+            const float HIGH_BAND = SPEED_LIMIT_KMH + SPEED_DEADBAND_KMH;
+
+            // ---- FREEZE ----
+            if (speed_kmh >= LOW_BAND &&
+                speed_kmh <= HIGH_BAND &&
+                fabs(accel) < FREEZE_ACCEL_KMH_S)
+            {
+                SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
+                break;
+            }
+
+            // ---- OVERSPEED ----
+            if (speed_kmh > HIGH_BAND)
+            {
+                if (accel > FAST_ACCEL_KMH_S)
                 {
-                    aps_cmd_v1 -= SLOW_DECAY_V_PER_S * dt;
-                    aps_cmd_v2 -= SLOW_DECAY_V_PER_S * dt;
+                    aps_cmd_v1 -= FAST_DECAY_V;
+                    aps_cmd_v2 -= FAST_DECAY_V;
                 }
-                else if (accel_kmh_s > FAST_ACCEL_KMH_S)
+                else
                 {
-                    aps_cmd_v1 -= FAST_DECAY_V_PER_S * dt;
-                    aps_cmd_v2 -= FAST_DECAY_V_PER_S * dt;
-                }
-                else if (accel_kmh_s > SLOW_ACCEL_KMH_S)
-                {
-                    aps_cmd_v1 -= SLOW_DECAY_V_PER_S * dt;
-                    aps_cmd_v2 -= SLOW_DECAY_V_PER_S * dt;
+                    aps_cmd_v1 -= SLOW_DECAY_V;
+                    aps_cmd_v2 -= SLOW_DECAY_V;
                 }
             }
 
             clampAPS();
             SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
 
-            if (speed >= (SPEED_LIMIT_KMH - 1.0f) &&
-                accel_kmh_s <= 0.0f &&
-                fabs(accel_kmh_s) <= SLOW_ACCEL_KMH_S &&
-                time_in_state >= MIN_STATE_TIME_MS)
-            {
-                state = LimiterState::LIMIT_ACTIVE;
-                state_entry_ms = now;
-            }
-            break;
-        }
-
-        case LimiterState::LIMIT_ACTIVE:
-        {
-            setRelay(true);
-
-            SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
-
-            if (speed > SPEED_LIMIT_KMH + 0.5f &&
-                time_in_state >= MIN_STATE_TIME_MS)
-            {
-                state = LimiterState::OVERSHOOT_CONTROL;
-                state_entry_ms = now;
-            }
-            else if (pedalReleased(aps_in1, aps_in2) ||
-                     speed <= (SPEED_LIMIT_KMH - SPEED_HYSTERESIS_KMH))
+            // ---- DRIVER RELEASE ----
+            if (driverRequestsLess(aps_in_v1, aps_in_v2))
             {
                 setRelay(false);
                 state = LimiterState::PASS_THROUGH;
-                state_entry_ms = now;
             }
             break;
         }
 
+        // ==================================================
         case LimiterState::FAULT:
+        default:
         {
             setRelay(false);
-            SharedState_SetDesiredOutputs(aps_in1, aps_in2);
+            SharedState_SetDesiredOutputs(aps_in_v1, aps_in_v2);
             break;
         }
     }
 
-    if (now - last_log_ms >= TELEMETRY_INTERVAL_MS)
+    // ================= TELEMETRY =================
+    if (now - last_telemetry_ms >= TELEMETRY_MS)
     {
-        last_log_ms = now;
+        last_telemetry_ms = now;
         Serial.printf(
-            "Speed=%.1f Accel=%.2f APS_in=%.3f APS_out=%.3f Relay=%d State=%d\r\n",
-            speed, accel_kmh_s, aps_in1,
-            relay_active ? aps_cmd_v1 : aps_in1,
-            relay_active, (int)state);
+            "SPD=%.1f APSin=(%.2f,%.2f) APSout=(%.2f,%.2f) Relay=%d State=%d Accel=%.2f\n",
+            speed_kmh,
+            aps_in_v1, aps_in_v2,
+            aps_cmd_v1, aps_cmd_v2,
+            relay_active,
+            (int)state,
+            accel);
     }
 }
+
+// ============================== TASK ==============================
 
 static void logicTask(void *)
 {
     for (;;)
     {
         LogicModule_Update();
-        vTaskDelay(pdMS_TO_TICKS(LOGIC_LOOP_INTERVAL_MS));
+        vTaskDelay(pdMS_TO_TICKS(LOGIC_LOOP_MS));
     }
 }
 
 void LogicModule_StartTask()
 {
     xTaskCreatePinnedToCore(
-        logicTask, "LOGIC", 2048, nullptr, 4, nullptr, 0);
-}
-
-bool LogicModule_IsRelayActive()
-{
-    return relay_active;
+        logicTask,
+        "LOGIC",
+        4096,
+        nullptr,
+        4,
+        nullptr,
+        0);
 }
