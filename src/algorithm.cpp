@@ -379,6 +379,7 @@ void LogicModule_Update(float speed_limit_kmh)
             setRelayActive(true);
 
             bool overspeed = (speed_kmh > speed_limit_kmh);
+            bool speed_falling = (accel_kmh_s < -SLOW_ACCEL_KMH_S);
 
             // Full pedal release => immediate return to pass-through.
             if (pedalFullyReleased(aps_in_v1, aps_in_v2))
@@ -417,6 +418,25 @@ void LogicModule_Update(float speed_limit_kmh)
                 Serial.printf("STATE_DETAIL release_kmh=%.1f activation_kmh=%.1f\r\n",
                               release_kmh,
                               activation_kmh);
+
+                relay_active = false;
+                setRelayActive(false);
+                state = LimiterState::PASS_THROUGH;
+                SharedState_SetDesiredOutputs(aps_in_v1, aps_in_v2);
+                break;
+            }
+
+            // If we are below the limit and decelerating, return authority to the driver.
+            if ((speed_kmh < speed_limit_kmh) && speed_falling)
+            {
+                logStateTransitionReason(
+                    state,
+                    LimiterState::PASS_THROUGH,
+                    "below limit and decelerating",
+                    speed_kmh,
+                    speed_limit_kmh,
+                    accel_kmh_s,
+                    time_in_state_ms);
 
                 relay_active = false;
                 setRelayActive(false);
@@ -475,6 +495,8 @@ void LogicModule_Update(float speed_limit_kmh)
             relay_active = true;
             setRelayActive(true);
 
+            bool speed_falling = (accel_kmh_s < -SLOW_ACCEL_KMH_S);
+
             // LIMIT_ACTIVE is a freeze/hold state: no decay is applied here.
             // If we actually overspeed, jump back to OVERSHOOT_CONTROL where cuts are applied.
             // Add small deadband to prevent oscillation: only transition if significantly overspeed
@@ -502,6 +524,25 @@ void LogicModule_Update(float speed_limit_kmh)
                     state,
                     LimiterState::PASS_THROUGH,
                     "pedal fully released",
+                    speed_kmh,
+                    speed_limit_kmh,
+                    accel_kmh_s,
+                    time_in_state_ms);
+
+                relay_active = false;
+                setRelayActive(false);
+                state = LimiterState::PASS_THROUGH;
+                SharedState_SetDesiredOutputs(aps_in_v1, aps_in_v2);
+                break;
+            }
+
+            // If speed is decreasing, release authority back to the driver.
+            if (speed_falling)
+            {
+                logStateTransitionReason(
+                    state,
+                    LimiterState::PASS_THROUGH,
+                    "decelerating",
                     speed_kmh,
                     speed_limit_kmh,
                     accel_kmh_s,
