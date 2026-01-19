@@ -67,6 +67,57 @@
 
 #include <Arduino.h>
 
+#ifdef MANUAL
+#include "sl_config.h"
+#include "can_module.h"
+#include "shared_state.h"
+
+static const uint16_t SPEED_LIMIT_KMH = SPEED_LIMIT_DEFAULT_KMH;
+static const uint8_t SPEED_LIMIT_HYST_KMH = 5;
+
+static bool g_relay_active = false;
+
+static void setRelayActive(bool active) {
+  g_relay_active = active;
+  digitalWrite(RELAY_PIN, active ? HIGH : LOW);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(150);
+
+  Serial.println("Speed Limiter - MANUAL MODE");
+  Serial.println("CAN speed -> relay on/off only");
+
+  pinMode(RELAY_PIN, OUTPUT);
+  setRelayActive(false);
+
+  CanModule_Begin();
+  CanModule_StartTask();
+}
+
+void loop() {
+  uint32_t now = millis();
+  bool speed_valid = SharedState_SpeedValid(now, SPEED_TIMEOUT_MS);
+
+  if (!speed_valid) {
+    if (g_relay_active) {
+      setRelayActive(false);
+    }
+  } else {
+    uint8_t speed_kmh = g_speed_kmh;
+    if (!g_relay_active && speed_kmh >= SPEED_LIMIT_KMH) {
+      setRelayActive(true);
+    } else if (g_relay_active && speed_kmh <= (int32_t)SPEED_LIMIT_KMH - SPEED_LIMIT_HYST_KMH) {
+      setRelayActive(false);
+    }
+  }
+
+  delay(20);
+}
+
+#else
+
 #include "adc_module.h"
 #include "can_module.h"
 #include "pwm_module.h"
@@ -100,3 +151,4 @@ void loop() {
   delay(1000);
 }
 
+#endif
