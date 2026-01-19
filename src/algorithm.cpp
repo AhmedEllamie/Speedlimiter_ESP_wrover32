@@ -30,17 +30,28 @@
 // ============================== CONFIG ==============================
 
 // Pre-limit activation threshold: (speed_limit - margin) => OVERSHOOT_CONTROL.
-static constexpr float SPEED_MARGIN_KMH = 3.0f;
+// Use the same offset as defined in sl_config.h for consistency.
+static constexpr float SPEED_MARGIN_KMH = (float)SPEED_LIMIT_ACTIVATION_OFFSET_KMH;
 
 // Deactivation threshold in LIMIT_ACTIVE: (speed_limit - hysteresis) => PASS_THROUGH.
 static constexpr float SPEED_HYSTERESIS_KMH = (float)SPEED_LIMIT_DEACTIVATION_HYSTERESIS_KMH;
 
 // Windowed acceleration config (trend estimate only).
-static constexpr uint8_t ACCEL_WINDOW_SAMPLES = 10;
+static constexpr uint8_t ACCEL_WINDOW_SAMPLES = 5;
 
 // Acceleration thresholds (km/h/s) AFTER windowing.
 static constexpr float FAST_ACCEL_KMH_S = 2.0f;
-static constexpr float SLOW_ACCEL_KMH_S = 0.3f;
+// NOTE: CAN speed is integer km/h; small dithering can look like non-zero accel.
+// This threshold is a deadband to avoid one-way "ratchet down" on noise.
+static constexpr float SLOW_ACCEL_KMH_S = 0.5f;
+
+// Treat "near the limit" as "at the limit" due to integer speed steps.
+// Example: SL=55 => enter LIMIT_ACTIVE at 54 km/h when accel is stable.
+static constexpr float LIMIT_ENTRY_BAND_BELOW_KMH = 5.0f;
+
+// If OVERSHOOT_CONTROL pulls speed down far enough below activation, give back control.
+// Example: activation=52 (55-3), release at <=50 (activation-2).
+static constexpr float OVERSHOOT_RELEASE_HYSTERESIS_KMH = 10.0f;
 
 // Output decay rates (ECU-level volts per second).
 // These preserve the previous "per-10ms-step" behavior while remaining dt-scaled:
@@ -75,6 +86,7 @@ enum class LimiterState
 static TaskHandle_t g_logic_task = nullptr;
 
 static LimiterState state = LimiterState::PASS_THROUGH;
+static LimiterState last_state_for_log = LimiterState::PASS_THROUGH;
 
 // Commanded ECU-level APS outputs (latched and edited while relay is ON).
 static float aps_cmd_v1 = DEFAULT_SIGNAL_S1_V;
@@ -87,6 +99,11 @@ static bool relay_active = false;
 static uint32_t prev_time_ms = 0;
 static uint32_t last_telemetry_ms = 0;
 
+// State timing for debouncing (prevent rapid oscillations).
+static uint32_t state_entry_time_ms = 0;
+static LimiterState prev_state_for_timing = LimiterState::PASS_THROUGH;
+static constexpr uint32_t MIN_STATE_TIME_MS = 50; // Minimum 50ms in LIMIT_ACTIVE before allowing transitions
+
 // Speed window buffer for windowed acceleration estimate.
 static float speed_window_kmh[ACCEL_WINDOW_SAMPLES] = {0.0f};
 static uint32_t speed_window_ms[ACCEL_WINDOW_SAMPLES] = {0};
@@ -98,6 +115,7 @@ static float last_accel_kmh_s = 0.0f;
 // ============================== HELPERS =============================
 
 static float maxf(float a, float b) { return (a > b) ? a : b; }
+static float absf(float x) { return (x < 0.0f) ? -x : x; }
 
 static void setRelayActive(bool active)
 {
@@ -183,7 +201,13 @@ static bool pedalFullyReleased(float aps_in_v1, float aps_in_v2)
 
 static bool driverOverrideRelease(float aps_in_v1, float aps_in_v2)
 {
-    // Release relay when driver's current demand is lower than our commanded output.
+    // Driver is requesting LESS torque than our current commanded output.
+    // This can happen when we latched aps_cmd and the driver lifts.
+    //
+    // IMPORTANT:
+    // We should NEVER output more than the driver is requesting.
+    // Instead of dropping relay authority (which can cause PASS_THROUGH <-> OVERSHOOT chatter
+    // while speed is still above activation), we use this signal to clamp aps_cmd downward.
     return (aps_in_v1 < (aps_cmd_v1 - APS_RELEASE_DELTA_V)) ||
            (aps_in_v2 < (aps_cmd_v2 - APS_RELEASE_DELTA_V));
 }
@@ -211,12 +235,15 @@ void LogicModule_Begin()
 {
     // Initialization (fail-safe)
     state = LimiterState::PASS_THROUGH;
+    last_state_for_log = state;
     relay_active = false;
     aps_cmd_v1 = DEFAULT_SIGNAL_S1_V;
     aps_cmd_v2 = DEFAULT_SIGNAL_S2_V;
 
     prev_time_ms = millis();
     last_telemetry_ms = prev_time_ms;
+    state_entry_time_ms = prev_time_ms;
+    prev_state_for_timing = state;
 
     pinMode(RELAY_PIN, OUTPUT);
     setRelayActive(false); // fail-safe at boot
@@ -265,6 +292,14 @@ void LogicModule_Update(float speed_limit_kmh)
     float accel_kmh_s = ComputeWindowedAccel(speed_kmh, speed_sample_ms);
 
     // ---------------- State machine ----------------
+    // Track state entry time for debouncing
+    if (state != prev_state_for_timing)
+    {
+        state_entry_time_ms = now_ms;
+        prev_state_for_timing = state;
+    }
+    uint32_t time_in_state_ms = now_ms - state_entry_time_ms;
+
     switch (state)
     {
         case LimiterState::PASS_THROUGH:
@@ -306,8 +341,10 @@ void LogicModule_Update(float speed_limit_kmh)
             relay_active = true;
             setRelayActive(true);
 
-            // Driver releases pedal => immediate return to pass-through.
-            if (pedalFullyReleased(aps_in_v1, aps_in_v2) || driverOverrideRelease(aps_in_v1, aps_in_v2))
+            bool overspeed = (speed_kmh > speed_limit_kmh);
+
+            // Full pedal release => immediate return to pass-through.
+            if (pedalFullyReleased(aps_in_v1, aps_in_v2))
             {
                 relay_active = false;
                 setRelayActive(false);
@@ -316,14 +353,46 @@ void LogicModule_Update(float speed_limit_kmh)
                 break;
             }
 
+            // If we undershoot well below the activation threshold, release authority.
+            // This prevents getting "stuck" at the minimum clamp when the accel estimate is noisy.
+            float activation_kmh = speed_limit_kmh - SPEED_MARGIN_KMH;
+            float release_kmh = activation_kmh - OVERSHOOT_RELEASE_HYSTERESIS_KMH;
+            if (release_kmh < 0.0f) release_kmh = 0.0f;
+            if (speed_kmh <= release_kmh)
+            {
+                relay_active = false;
+                setRelayActive(false);
+                state = LimiterState::PASS_THROUGH;
+                SharedState_SetDesiredOutputs(aps_in_v1, aps_in_v2);
+                break;
+            }
+
+            // Driver asks for LESS than our current output:
+            // keep relay authority, but clamp aps_cmd down to match driver input (never increases).
+            if (driverOverrideRelease(aps_in_v1, aps_in_v2))
+            {
+                aps_cmd_v1 = aps_in_v1;
+                aps_cmd_v2 = aps_in_v2;
+                clampCmdToFloors();
+                SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
+                break;
+            }
+
             // Accel-based trimming (never increase in this state).
-            applyAccelBasedDecay(accel_kmh_s, dt_s, false /*force_slow_cut*/);
+            // If we're already above the limit, force at least a slow cut regardless of accel estimate.
+            applyAccelBasedDecay(accel_kmh_s, dt_s, overspeed /*force_slow_cut*/);
             clampCmdToFloors();
 
             SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
 
-            // Reached the limit => hold torque in LIMIT_ACTIVE.
-            if (speed_kmh >= speed_limit_kmh)
+            // Transition to LIMIT_ACTIVE when we're at/near the limit and stable.
+            // Use a tighter band (2 km/h instead of 5) and require stable acceleration to prevent oscillation.
+            // Also require minimum time in OVERSHOOT_CONTROL to prevent rapid transitions.
+            bool near_limit = (speed_kmh >= (speed_limit_kmh - 2.0f)) && (speed_kmh <= (speed_limit_kmh + 0.5f));
+            bool stable_accel = absf(accel_kmh_s) <= SLOW_ACCEL_KMH_S;
+            bool min_time_elapsed = time_in_state_ms >= (MIN_STATE_TIME_MS / 2); // Half the debounce time for entry
+            
+            if (!overspeed && near_limit && stable_accel && min_time_elapsed)
             {
                 state = LimiterState::LIMIT_ACTIVE;
             }
@@ -336,35 +405,47 @@ void LogicModule_Update(float speed_limit_kmh)
             relay_active = true;
             setRelayActive(true);
 
-            // Exit on driver release.
-            if (pedalFullyReleased(aps_in_v1, aps_in_v2) || driverOverrideRelease(aps_in_v1, aps_in_v2))
+            // LIMIT_ACTIVE is a freeze/hold state: no decay is applied here.
+            // If we actually overspeed, jump back to OVERSHOOT_CONTROL where cuts are applied.
+            // Add small deadband to prevent oscillation: only transition if significantly overspeed
+            // AND we've been in this state long enough (debouncing).
+            if (speed_kmh > (speed_limit_kmh + 0.5f) && time_in_state_ms >= MIN_STATE_TIME_MS)
+            {
+                state = LimiterState::OVERSHOOT_CONTROL;
+                SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
+                break;
+            }
+
+            // Full pedal release => return to pass-through.
+            if (pedalFullyReleased(aps_in_v1, aps_in_v2))
             {
                 relay_active = false;
                 setRelayActive(false);
                 state = LimiterState::PASS_THROUGH;
                 SharedState_SetDesiredOutputs(aps_in_v1, aps_in_v2);
+                break;
+            }
+
+            // Driver asks for LESS than our current output:
+            // stay in LIMIT_ACTIVE, but clamp aps_cmd down to match driver input (never increases).
+            if (driverOverrideRelease(aps_in_v1, aps_in_v2))
+            {
+                aps_cmd_v1 = aps_in_v1;
+                aps_cmd_v2 = aps_in_v2;
+                clampCmdToFloors();
+                SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
                 break;
             }
 
             // Exit when speed is safely below limit (hysteresis).
-            if (speed_kmh < (speed_limit_kmh - SPEED_HYSTERESIS_KMH))
+            // Add debouncing: must be below threshold for minimum time to prevent oscillation.
+            if (speed_kmh <= (speed_limit_kmh - SPEED_HYSTERESIS_KMH) && time_in_state_ms >= MIN_STATE_TIME_MS)
             {
                 relay_active = false;
                 setRelayActive(false);
                 state = LimiterState::PASS_THROUGH;
                 SharedState_SetDesiredOutputs(aps_in_v1, aps_in_v2);
                 break;
-            }
-
-            // Freeze APS_out at the hold value. Only reduce again if speed rises/overspeeds.
-            bool overspeed = (speed_kmh > speed_limit_kmh);
-            bool rising = (accel_kmh_s > SLOW_ACCEL_KMH_S);
-
-            if (overspeed || rising)
-            {
-                // If overspeed, force at least a slow cut even if accel estimate is ~0.
-                applyAccelBasedDecay(accel_kmh_s, dt_s, overspeed /*force_slow_cut*/);
-                clampCmdToFloors();
             }
 
             SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
@@ -380,6 +461,13 @@ void LogicModule_Update(float speed_limit_kmh)
             SharedState_SetDesiredOutputs(aps_in_v1, aps_in_v2);
             break;
         }
+    }
+
+    // Print state transitions immediately (telemetry is throttled, but state changes can be fast).
+    if (state != last_state_for_log)
+    {
+        Serial.printf("STATE %s -> %s\r\n", stateToString(last_state_for_log), stateToString(state));
+        last_state_for_log = state;
     }
 
     // ---------------- USB telemetry output ----------------
