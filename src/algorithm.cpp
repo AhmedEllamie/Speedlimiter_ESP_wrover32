@@ -134,6 +134,25 @@ static const char *stateToString(LimiterState s)
     }
 }
 
+static void logStateTransitionReason(LimiterState from,
+                                     LimiterState to,
+                                     const char *reason,
+                                     float speed_kmh,
+                                     float speed_limit_kmh,
+                                     float accel_kmh_s,
+                                     uint32_t time_in_state_ms)
+{
+    Serial.printf(
+        "STATE_REASON %s -> %s: %s (speed=%.1f, limit=%.1f, accel=%.2f, time=%ums)\r\n",
+        stateToString(from),
+        stateToString(to),
+        reason,
+        speed_kmh,
+        speed_limit_kmh,
+        accel_kmh_s,
+        (unsigned)time_in_state_ms);
+}
+
 static void Logic_EnterFault()
 {
     state = LimiterState::FAULT;
@@ -271,6 +290,9 @@ void LogicModule_Update(float speed_limit_kmh)
     aps_in_v1 = maxf(aps_in_v1, DEFAULT_SIGNAL_S1_V);
     aps_in_v2 = maxf(aps_in_v2, DEFAULT_SIGNAL_S2_V);
 
+    float speed_kmh = (float)g_speed_kmh;
+    uint32_t speed_sample_ms = g_speed_last_update_ms;
+
     bool speed_valid = SharedState_SpeedValid(now_ms, SPEED_TIMEOUT_MS);
     if (!speed_valid)
     {
@@ -278,12 +300,17 @@ void LogicModule_Update(float speed_limit_kmh)
         // But do NOT latch FAULT in PASS_THROUGH at startup (speed isn't valid yet).
         if (state != LimiterState::PASS_THROUGH)
         {
+            logStateTransitionReason(
+                state,
+                LimiterState::FAULT,
+                "speed invalid while relay under MCU authority",
+                speed_kmh,
+                speed_limit_kmh,
+                0.0f,
+                0);
             Logic_EnterFault();
         }
     }
-
-    float speed_kmh = (float)g_speed_kmh;
-    uint32_t speed_sample_ms = g_speed_last_update_ms;
 
     // RPM is for logging only.
     uint16_t rpm = (uint16_t)g_rpm;
@@ -319,6 +346,16 @@ void LogicModule_Update(float speed_limit_kmh)
             // Only if speed is valid (avoid using stale/invalid speed at boot).
             if (speed_valid && speed_kmh >= (speed_limit_kmh - SPEED_MARGIN_KMH))
             {
+                logStateTransitionReason(
+                    state,
+                    LimiterState::OVERSHOOT_CONTROL,
+                    "pre-limit activation (speed>=limit-margin)",
+                    speed_kmh,
+                    speed_limit_kmh,
+                    accel_kmh_s,
+                    time_in_state_ms);
+                Serial.printf("STATE_DETAIL margin_kmh=%.1f\r\n", SPEED_MARGIN_KMH);
+
                 // Bumpless capture.
                 aps_cmd_v1 = aps_in_v1;
                 aps_cmd_v2 = aps_in_v2;
@@ -346,6 +383,15 @@ void LogicModule_Update(float speed_limit_kmh)
             // Full pedal release => immediate return to pass-through.
             if (pedalFullyReleased(aps_in_v1, aps_in_v2))
             {
+                logStateTransitionReason(
+                    state,
+                    LimiterState::PASS_THROUGH,
+                    "pedal fully released",
+                    speed_kmh,
+                    speed_limit_kmh,
+                    accel_kmh_s,
+                    time_in_state_ms);
+
                 relay_active = false;
                 setRelayActive(false);
                 state = LimiterState::PASS_THROUGH;
@@ -360,6 +406,18 @@ void LogicModule_Update(float speed_limit_kmh)
             if (release_kmh < 0.0f) release_kmh = 0.0f;
             if (speed_kmh <= release_kmh)
             {
+                logStateTransitionReason(
+                    state,
+                    LimiterState::PASS_THROUGH,
+                    "underspeed release (speed<=release)",
+                    speed_kmh,
+                    speed_limit_kmh,
+                    accel_kmh_s,
+                    time_in_state_ms);
+                Serial.printf("STATE_DETAIL release_kmh=%.1f activation_kmh=%.1f\r\n",
+                              release_kmh,
+                              activation_kmh);
+
                 relay_active = false;
                 setRelayActive(false);
                 state = LimiterState::PASS_THROUGH;
@@ -394,6 +452,18 @@ void LogicModule_Update(float speed_limit_kmh)
             
             if (!overspeed && near_limit && stable_accel && min_time_elapsed)
             {
+                logStateTransitionReason(
+                    state,
+                    LimiterState::LIMIT_ACTIVE,
+                    "enter limit_active (near && stable && min_time)",
+                    speed_kmh,
+                    speed_limit_kmh,
+                    accel_kmh_s,
+                    time_in_state_ms);
+                Serial.printf("STATE_DETAIL near_limit=%d stable_accel=%d min_time_elapsed=%d\r\n",
+                              near_limit ? 1 : 0,
+                              stable_accel ? 1 : 0,
+                              min_time_elapsed ? 1 : 0);
                 state = LimiterState::LIMIT_ACTIVE;
             }
             break;
@@ -411,6 +481,15 @@ void LogicModule_Update(float speed_limit_kmh)
             // AND we've been in this state long enough (debouncing).
             if (speed_kmh > (speed_limit_kmh + 0.5f) && time_in_state_ms >= MIN_STATE_TIME_MS)
             {
+                logStateTransitionReason(
+                    state,
+                    LimiterState::OVERSHOOT_CONTROL,
+                    "overspeed re-entry (speed>limit+0.5, min_time)",
+                    speed_kmh,
+                    speed_limit_kmh,
+                    accel_kmh_s,
+                    time_in_state_ms);
+                Serial.printf("STATE_DETAIL min_time_ms=%u\r\n", (unsigned)MIN_STATE_TIME_MS);
                 state = LimiterState::OVERSHOOT_CONTROL;
                 SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
                 break;
@@ -419,6 +498,15 @@ void LogicModule_Update(float speed_limit_kmh)
             // Full pedal release => return to pass-through.
             if (pedalFullyReleased(aps_in_v1, aps_in_v2))
             {
+                logStateTransitionReason(
+                    state,
+                    LimiterState::PASS_THROUGH,
+                    "pedal fully released",
+                    speed_kmh,
+                    speed_limit_kmh,
+                    accel_kmh_s,
+                    time_in_state_ms);
+
                 relay_active = false;
                 setRelayActive(false);
                 state = LimiterState::PASS_THROUGH;
@@ -441,6 +529,18 @@ void LogicModule_Update(float speed_limit_kmh)
             // Add debouncing: must be below threshold for minimum time to prevent oscillation.
             if (speed_kmh <= (speed_limit_kmh - SPEED_HYSTERESIS_KMH) && time_in_state_ms >= MIN_STATE_TIME_MS)
             {
+                logStateTransitionReason(
+                    state,
+                    LimiterState::PASS_THROUGH,
+                    "below hysteresis (speed<=limit-hyst, min_time)",
+                    speed_kmh,
+                    speed_limit_kmh,
+                    accel_kmh_s,
+                    time_in_state_ms);
+                Serial.printf("STATE_DETAIL hysteresis_kmh=%.1f min_time_ms=%u\r\n",
+                              SPEED_HYSTERESIS_KMH,
+                              (unsigned)MIN_STATE_TIME_MS);
+
                 relay_active = false;
                 setRelayActive(false);
                 state = LimiterState::PASS_THROUGH;
