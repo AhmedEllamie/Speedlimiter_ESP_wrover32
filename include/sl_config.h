@@ -81,7 +81,7 @@ static const uint16_t SPEED_LIMIT_ACTIVATION_OFFSET_KMH = 10;
 // Turn relay OFF once speed falls this far below the effective limit.
 // Example: SL=40, activation offset=5 => effective_limit=35.
 // With hysteresis=5, relay turns OFF at <=30 km/h (CAN speed).
-static const uint16_t SPEED_LIMIT_DEACTIVATION_HYSTERESIS_KMH = 5;
+static const uint16_t SPEED_LIMIT_DEACTIVATION_HYSTERESIS_KMH = 10;
 
 // -----------------------------------------------------------------------------
 // Pedal scaling + safety floors

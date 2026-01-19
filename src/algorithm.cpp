@@ -448,7 +448,7 @@ void LogicModule_Update(float speed_limit_kmh)
             // Also require minimum time in OVERSHOOT_CONTROL to prevent rapid transitions.
             bool near_limit = (speed_kmh >= (speed_limit_kmh - 2.0f)) && (speed_kmh <= (speed_limit_kmh + 0.5f));
             bool stable_accel = absf(accel_kmh_s) <= SLOW_ACCEL_KMH_S;
-            bool min_time_elapsed = time_in_state_ms >= (MIN_STATE_TIME_MS / 2); // Half the debounce time for entry
+            bool min_time_elapsed = time_in_state_ms >= MIN_STATE_TIME_MS; // Full debounce time for entry
             
             if (!overspeed && near_limit && stable_accel && min_time_elapsed)
             {
