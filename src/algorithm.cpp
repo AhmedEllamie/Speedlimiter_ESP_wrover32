@@ -468,21 +468,23 @@ void LogicModule_Update(float speed_limit_kmh)
             // Also require minimum time in OVERSHOOT_CONTROL to prevent rapid transitions.
             bool near_limit = (speed_kmh >= (speed_limit_kmh - 2.0f)) && (speed_kmh <= (speed_limit_kmh + 0.5f));
             bool stable_accel = absf(accel_kmh_s) <= SLOW_ACCEL_KMH_S;
+            bool not_increasing = (accel_kmh_s <= 0.0f);
             bool min_time_elapsed = time_in_state_ms >= MIN_STATE_TIME_MS; // Full debounce time for entry
             
-            if (!overspeed && near_limit && stable_accel && min_time_elapsed)
+            if (!overspeed && near_limit && stable_accel && not_increasing && min_time_elapsed)
             {
                 logStateTransitionReason(
                     state,
                     LimiterState::LIMIT_ACTIVE,
-                    "enter limit_active (near && stable && min_time)",
+                    "enter limit_active (near && stable && not_increasing && min_time)",
                     speed_kmh,
                     speed_limit_kmh,
                     accel_kmh_s,
                     time_in_state_ms);
-                Serial.printf("STATE_DETAIL near_limit=%d stable_accel=%d min_time_elapsed=%d\r\n",
+                Serial.printf("STATE_DETAIL near_limit=%d stable_accel=%d not_increasing=%d min_time_elapsed=%d\r\n",
                               near_limit ? 1 : 0,
                               stable_accel ? 1 : 0,
+                              not_increasing ? 1 : 0,
                               min_time_elapsed ? 1 : 0);
                 state = LimiterState::LIMIT_ACTIVE;
             }
