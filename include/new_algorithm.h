@@ -6,30 +6,28 @@
 // -----------------------------------------------------------------------------
 // APPS (APS1/APS2) lookup table for the new algorithm.
 //
-// The algorithm selects an APPS pair based on the *speed limit* (km/h):
-// - Row 0: SL < 5
-// - Row 1: SL < 10
-// - Row 2: SL < 20
-// - Row 3: SL < 30
-// - Row 4: SL in [30..100] (and above, clamped)
+// The algorithm selects an APPS pair based on the *speed limit* (km/h) using this
+// speed->APPS map and LINEAR INTERPOLATION between points.
 //
-// Values are ECU-level volts (same domain as g_aps*_v / g_sdps*_v).
-// TODO: Tune these values per vehicle.
+// Values are ECU-level millivolts (after pedal scaling) taken from the car.
 // -----------------------------------------------------------------------------
 
-static constexpr uint16_t NISSAN_SENTRA_APPS_SPEED_BOUNDS_KMH[] = {5, 10, 20, 30, 100};
-
-// 2-D array: [row][0]=APS1_V, [row][1]=APS2_V
-static constexpr float NISSAN_SENTRA_APPS_TABLE_V[][2] = {
-    {0.350f, 0.700f}, // SL < 5
-    {0.500f, 1.100f}, // SL < 10
-    {0.600f, 1.250f}, // SL < 20
-    {0.700f, 1.500f}, // SL < 30
-    {0.900f, 1.800f}, // SL 30..100 (and above)
+struct NissanSentraAppsMapPoint {
+  uint16_t speed_kmh;
+  uint16_t aps1_mv;
+  uint16_t aps2_mv;
 };
 
-static constexpr size_t NISSAN_SENTRA_APPS_TABLE_LEN =
-    sizeof(NISSAN_SENTRA_APPS_SPEED_BOUNDS_KMH) / sizeof(NISSAN_SENTRA_APPS_SPEED_BOUNDS_KMH[0]);
+static constexpr NissanSentraAppsMapPoint NISSAN_SENTRA_APPS_SPEED_MAP[] = {
+    // speed_kmh, aps1_mv, aps2_mv
+    {10, 350, 700},
+    {20, 450, 850},
+    {30, 480, 900},
+    {40, 520, 1000},
+    {50, 550, 1060},
+    {60, 600, 1150},
+    {70, 630, 1200},
+};
 
-static_assert(NISSAN_SENTRA_APPS_TABLE_LEN == (sizeof(NISSAN_SENTRA_APPS_TABLE_V) / sizeof(NISSAN_SENTRA_APPS_TABLE_V[0])),
-              "APPS bounds/table length mismatch");
+static constexpr size_t NISSAN_SENTRA_APPS_SPEED_MAP_LEN =
+    sizeof(NISSAN_SENTRA_APPS_SPEED_MAP) / sizeof(NISSAN_SENTRA_APPS_SPEED_MAP[0]);

@@ -29,6 +29,13 @@ static constexpr uint16_t BAND_SPEED_KMH = SPEED_LIMIT_ACTIVATION_OFFSET_KMH;
 // (9) LIMIT_ACTIVE when SPD in (SL +/- 2)
 static constexpr uint8_t LIMIT_ACTIVE_TOLERANCE_KMH = 2;
 
+// Decay tuning:
+// - Keep these conservative to avoid dropping APS_hold toward DEFAULT_SIGNAL too fast.
+static constexpr float DECAY_RATE_MIN_PER_S = 0.005f;       // gentle cut at band start
+static constexpr float DECAY_RATE_MAX_PER_S = 0.025f;       // stronger cut near SL
+static constexpr float DECAY_RATE_OVERSPEED_PER_S = 0.60f; // cut when already above SL
+static constexpr float DECAY_DT_MAX_S = 0.10f;             // avoid big one-step drops
+
 enum class LimiterState {
   PASS_THROUGH = 0,
   OVERSHOOT_CONTROL = 1,
@@ -67,6 +74,7 @@ static uint32_t last_speed_sample_update_ms = 0;
 static SpeedTrend last_speed_trend = SpeedTrend::UNKNOWN;
 
 static float maxf(float a, float b) { return (a > b) ? a : b; }
+static float mvToVolts(uint16_t mv) { return (float)mv / 1000.0f; }
 
 static float clampf(float x, float lo, float hi) {
   if (x < lo) return lo;
@@ -115,16 +123,53 @@ static bool isSpeedFalling(uint8_t speed_kmh, uint32_t speed_update_ms) {
 static void lookupAppsTableForSpeedLimitKmh(uint16_t speed_limit_kmh, float *out_v1, float *out_v2) {
   if (!out_v1 || !out_v2) return;
 
-  size_t idx = (NISSAN_SENTRA_APPS_TABLE_LEN > 0) ? (NISSAN_SENTRA_APPS_TABLE_LEN - 1) : 0;
-  for (size_t i = 0; i < NISSAN_SENTRA_APPS_TABLE_LEN; i++) {
-    if (speed_limit_kmh < NISSAN_SENTRA_APPS_SPEED_BOUNDS_KMH[i]) {
-      idx = i;
-      break;
+  if (NISSAN_SENTRA_APPS_SPEED_MAP_LEN == 0) {
+    *out_v1 = DEFAULT_SIGNAL_S1_V;
+    *out_v2 = DEFAULT_SIGNAL_S2_V;
+    return;
+  }
+
+  const NissanSentraAppsMapPoint &first = NISSAN_SENTRA_APPS_SPEED_MAP[0];
+  if (speed_limit_kmh <= first.speed_kmh) {
+    *out_v1 = mvToVolts(first.aps1_mv);
+    *out_v2 = mvToVolts(first.aps2_mv);
+    *out_v1 = maxf(*out_v1, DEFAULT_SIGNAL_S1_V);
+    *out_v2 = maxf(*out_v2, DEFAULT_SIGNAL_S2_V);
+    return;
+  }
+
+  const NissanSentraAppsMapPoint &last = NISSAN_SENTRA_APPS_SPEED_MAP[NISSAN_SENTRA_APPS_SPEED_MAP_LEN - 1];
+  if (speed_limit_kmh >= last.speed_kmh) {
+    *out_v1 = mvToVolts(last.aps1_mv);
+    *out_v2 = mvToVolts(last.aps2_mv);
+    *out_v1 = maxf(*out_v1, DEFAULT_SIGNAL_S1_V);
+    *out_v2 = maxf(*out_v2, DEFAULT_SIGNAL_S2_V);
+    return;
+  }
+
+  for (size_t i = 0; (i + 1) < NISSAN_SENTRA_APPS_SPEED_MAP_LEN; i++) {
+    const NissanSentraAppsMapPoint &a = NISSAN_SENTRA_APPS_SPEED_MAP[i];
+    const NissanSentraAppsMapPoint &b = NISSAN_SENTRA_APPS_SPEED_MAP[i + 1];
+    if (speed_limit_kmh <= b.speed_kmh) {
+      uint16_t s0 = a.speed_kmh;
+      uint16_t s1 = b.speed_kmh;
+      float t = 0.0f;
+      if (s1 > s0) t = (float)(speed_limit_kmh - s0) / (float)(s1 - s0);
+
+      float aps1_mv = (float)a.aps1_mv + ((float)b.aps1_mv - (float)a.aps1_mv) * t;
+      float aps2_mv = (float)a.aps2_mv + ((float)b.aps2_mv - (float)a.aps2_mv) * t;
+
+      *out_v1 = mvToVolts((uint16_t)(aps1_mv + 0.5f));
+      *out_v2 = mvToVolts((uint16_t)(aps2_mv + 0.5f));
+      *out_v1 = maxf(*out_v1, DEFAULT_SIGNAL_S1_V);
+      *out_v2 = maxf(*out_v2, DEFAULT_SIGNAL_S2_V);
+      return;
     }
   }
 
-  *out_v1 = NISSAN_SENTRA_APPS_TABLE_V[idx][0];
-  *out_v2 = NISSAN_SENTRA_APPS_TABLE_V[idx][1];
+  // Fallback (shouldn't hit).
+  *out_v1 = mvToVolts(last.aps1_mv);
+  *out_v2 = mvToVolts(last.aps2_mv);
 
   // Safety floors.
   *out_v1 = maxf(*out_v1, DEFAULT_SIGNAL_S1_V);
@@ -263,7 +308,7 @@ static void LogicModule_Update() {
       if (in_band && (speed_rising || above_limit)) {
         float dt_s = (float)(now - last_control_ms) / 1000.0f;
         if (dt_s < 0.0f) dt_s = 0.0f;
-        if (dt_s > 0.25f) dt_s = 0.25f; // clamp: prevents big steps after pauses
+        if (dt_s > DECAY_DT_MAX_S) dt_s = DECAY_DT_MAX_S; // prevents big steps after pauses
         last_control_ms = now;
 
         float t = 1.0f;
@@ -273,8 +318,8 @@ static void LogicModule_Update() {
         t = clampf(t, 0.0f, 1.0f);
 
         // Decay ramps up as we approach SL. Overspeed -> harsh cut.
-        float decay_rate_per_s = 0.25f + (1.20f - 0.25f) * t;
-        if (above_limit) decay_rate_per_s = 2.0f;
+        float decay_rate_per_s = DECAY_RATE_MIN_PER_S + (DECAY_RATE_MAX_PER_S - DECAY_RATE_MIN_PER_S) * t;
+        if (above_limit) decay_rate_per_s = DECAY_RATE_OVERSPEED_PER_S;
 
         float scale = 1.0f - (decay_rate_per_s * dt_s);
         scale = clampf(scale, 0.0f, 1.0f);

@@ -67,8 +67,14 @@
 
 #include <Arduino.h>
 
-#ifdef MANUAL
 #include "sl_config.h"
+
+#if BUILD_TEST_LOGGER
+// Logger firmware (defines its own setup()/loop()).
+#include "test_logger_fw.h"
+#else
+
+#ifdef MANUAL
 #include "can_module.h"
 #include "shared_state.h"
 
@@ -152,3 +158,5 @@ void loop() {
 }
 
 #endif
+
+#endif // BUILD_TEST_LOGGER
