@@ -2,7 +2,7 @@
 #include "shared_state.h"
 #include "sl_config.h"
 
-#if !BUILD_TEST_LOGGER
+#if !BUILD_TEST_LOGGER && USE_ALGORITHM_MODULE
 
 #include <Arduino.h>
 #include <Preferences.h>
@@ -442,10 +442,10 @@ void LogicModule_StartTask() {
 
 bool LogicModule_IsRelayActive() { return relay_active; }
 
-#else
+#elif BUILD_TEST_LOGGER
 
 void LogicModule_Begin() {}
 void LogicModule_StartTask() {}
 bool LogicModule_IsRelayActive() { return false; }
 
-#endif // !BUILD_TEST_LOGGER
+#endif // !BUILD_TEST_LOGGER && USE_ALGORITHM_MODULE

@@ -9,6 +9,13 @@
 #define BUILD_TEST_LOGGER 0
 #endif
 
+// Select which LogicModule implementation to compile:
+// - USE_ALGORITHM_MODULE=1 -> `src/algorithm.cpp` (default)
+// - USE_ALGORITHM_MODULE=0 -> `src/new_algorithm.cpp`
+#ifndef USE_ALGORITHM_MODULE
+#define USE_ALGORITHM_MODULE 0
+#endif
+
 #ifndef USE_DAC_OUTPUT
 #define USE_DAC_OUTPUT 0
 #endif
