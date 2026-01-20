@@ -118,6 +118,33 @@ static const float LIMIT_RELAX_MAX_RISE_KMH_PER_S = 0.2f; // do NOT relax if spe
 static const float FACTOR_RATE_DOWN_PER_KMH_PER_S = 0.35f; // FAST reduction when overspeed
 static const float FACTOR_RATE_UP_PER_S = 0.08f;           // SLOW relax back toward 1.0
 
+// Speed derivative smoothing for the limiter (0..1). Higher = more smoothing.
+static const float LIMIT_SPEED_RATE_LPF_ALPHA = 0.85f;
+
+// -----------------------------------------------------------------------------
+// APS speed map (ECU-level millivolts)
+// -----------------------------------------------------------------------------
+// Used by the table-based limiter to cap APS_out based on speed limit.
+// Provide points in ascending speed order. The limiter will linearly interpolate
+// between points.
+struct ApsSpeedMapPoint {
+  uint16_t speed_kmh;
+  uint16_t aps1_mv;
+  uint16_t aps2_mv;
+};
+
+static constexpr ApsSpeedMapPoint APS_SPEED_MAP[] = {
+    // speed_kmh, aps1_mv, aps2_mv
+    {10, 500, 1100},
+    {20, 600, 1250},
+    {30, 700, 1500},
+    {40, 800, 1700},
+    {50, 900, 1800},
+};
+
+static constexpr uint8_t APS_SPEED_MAP_LEN =
+    (uint8_t)(sizeof(APS_SPEED_MAP) / sizeof(APS_SPEED_MAP[0]));
+
 // -----------------------------------------------------------------------------
 // Task rates
 // -----------------------------------------------------------------------------
