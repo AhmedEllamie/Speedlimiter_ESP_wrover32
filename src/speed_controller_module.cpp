@@ -68,7 +68,7 @@ static float mvToVolts(uint16_t mv) { return (float)mv / 1000.0f; }
 static TaskHandle_t g_sc_task = nullptr;
 
 static Preferences prefs;
-static uint16_t g_speed_limit_kmh = SPEED_LIMIT_DEFAULT_KMH;
+static uint16_t s_speed_limit_kmh = SPEED_LIMIT_DEFAULT_KMH;
 
 // USB CLI buffer (only: SL=<kmh>)
 static char cli_buf[32];
@@ -124,9 +124,9 @@ static void applySpeedLimitFromCli(const char *line) {
     return;
   }
 
-  g_speed_limit_kmh = (uint16_t)v;
-  prefs.putUShort(PREF_KEY_SL, g_speed_limit_kmh);
-  Serial.printf("OK SL=%u\r\n", (unsigned)g_speed_limit_kmh);
+  s_speed_limit_kmh = (uint16_t)v;
+  prefs.putUShort(PREF_KEY_SL, s_speed_limit_kmh);
+  Serial.printf("OK SL=%u\r\n", (unsigned)s_speed_limit_kmh);
 }
 
 static void handleUsbCli() {
@@ -209,13 +209,13 @@ static void printStatusLine(const LinkedInputs &in) {
 
 static void speedControllerStep(const LinkedInputs &in) {
   // Fail-safe: invalid speed or disabled SL -> relay OFF + pass-through.
-  if (!in.speed_valid || g_speed_limit_kmh == 0) {
+  if (!in.speed_valid || s_speed_limit_kmh == 0) {
     st.active = false;
     return;
   }
 
-  uint16_t activation_kmh = computeActivationKmh(g_speed_limit_kmh);
-  int32_t gap_kmh = (int32_t)g_speed_limit_kmh - (int32_t)in.speed_kmh;
+  uint16_t activation_kmh = computeActivationKmh(s_speed_limit_kmh);
+  int32_t gap_kmh = (int32_t)s_speed_limit_kmh - (int32_t)in.speed_kmh;
 
   // Rule #5: if SL - CAN_SPEED > 10 -> do nothing (not active).
   if (gap_kmh > (int32_t)SC_ACTIVATION_GAP_KMH) {
@@ -270,7 +270,7 @@ static void speedControllerStep(const LinkedInputs &in) {
 
   // Control objective: keep speed at exactly SL by trimming APS_out when speed rises,
   // and relaxing slowly back toward APS_in when safely under SL and not rising.
-  float speed_err_kmh = (float)in.speed_kmh - (float)g_speed_limit_kmh; // + = overspeed
+  float speed_err_kmh = (float)in.speed_kmh - (float)s_speed_limit_kmh; // + = overspeed
   float rise_kmh_s = st.speed_rate_kmh_s;
 
   // Rule #6c: if speed is increasing -> reduce outputs.
@@ -295,7 +295,7 @@ static void speedControllerStep(const LinkedInputs &in) {
   } else if (allow_relax) {
     // Rule #6e: calibrate/relax upward when we're safely under SL and not rising,
     // converging to "just enough" APS_out to hold speed near SL.
-    bool safely_under = ((float)g_speed_limit_kmh - (float)in.speed_kmh) >= SC_RELAX_BAND_KMH;
+    bool safely_under = ((float)s_speed_limit_kmh - (float)in.speed_kmh) >= SC_RELAX_BAND_KMH;
     bool not_rising = (rise_kmh_s <= 0.05f);
     if (safely_under && not_rising) {
       float k = clampf(SC_RATE_UP_PER_S * dt_s, 0.0f, 1.0f);
@@ -385,11 +385,11 @@ void SpeedControllerModule_Begin() {
   setRelayActive(false); // fail-safe at boot
 
   prefs.begin(PREF_NS, false);
-  g_speed_limit_kmh = prefs.getUShort(PREF_KEY_SL, SPEED_LIMIT_DEFAULT_KMH);
+  s_speed_limit_kmh = prefs.getUShort(PREF_KEY_SL, SPEED_LIMIT_DEFAULT_KMH);
 
   resetController(millis());
 
-  Serial.printf("SpeedControllerModule ready. SL=%u km/h\r\n", (unsigned)g_speed_limit_kmh);
+  Serial.printf("SpeedControllerModule ready. SL=%u km/h\r\n", (unsigned)s_speed_limit_kmh);
   Serial.println("Set speed limit with: SL=<0..250>");
 }
 

@@ -6,6 +6,12 @@
 volatile uint8_t g_speed_kmh = 0;
 volatile uint32_t g_speed_last_update_ms = 0;
 
+// 0 = disabled until loaded from Preferences (fail-safe).
+volatile uint16_t g_speed_limit_kmh = 0;
+
+// 1 = active (relay ON / limiting), 0 = inactive.
+volatile uint8_t g_speed_limiter_active = 0;
+
 volatile uint16_t g_rpm = 0;
 volatile uint32_t g_rpm_last_update_ms = 0;
 
@@ -29,6 +35,32 @@ bool SharedState_SpeedValid(uint32_t now_ms, uint32_t timeout_ms) {
   uint32_t last = g_speed_last_update_ms;
   if (last == 0) return false;
   return (uint32_t)(now_ms - last) <= timeout_ms;
+}
+
+void SharedState_SetSpeedLimitKmh(uint16_t kmh) {
+  portENTER_CRITICAL(&g_state_mux);
+  g_speed_limit_kmh = kmh;
+  portEXIT_CRITICAL(&g_state_mux);
+}
+
+uint16_t SharedState_GetSpeedLimitKmh() {
+  portENTER_CRITICAL(&g_state_mux);
+  uint16_t v = g_speed_limit_kmh;
+  portEXIT_CRITICAL(&g_state_mux);
+  return v;
+}
+
+void SharedState_SetLimiterActive(bool active) {
+  portENTER_CRITICAL(&g_state_mux);
+  g_speed_limiter_active = active ? 1 : 0;
+  portEXIT_CRITICAL(&g_state_mux);
+}
+
+bool SharedState_IsLimiterActive() {
+  portENTER_CRITICAL(&g_state_mux);
+  bool v = (g_speed_limiter_active != 0);
+  portEXIT_CRITICAL(&g_state_mux);
+  return v;
 }
 
 void SharedState_SetRpm(uint16_t rpm, uint32_t now_ms) {

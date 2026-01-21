@@ -23,10 +23,10 @@ static constexpr NissanSentraAppsMapPoint NISSAN_SENTRA_APPS_SPEED_MAP[] = {
     {10, 350, 700},
     {20, 450, 850},
     {30, 480, 900},
-    {40, 520, 1000},
-    {50, 540, 1040},
-    {60, 600, 1150},
-    {70, 630, 1200},
+    {40, 500, 970},
+    {50, 510, 1020},
+    {60, 580, 1120},
+    {70, 610, 1160},
 };
 
 static constexpr size_t NISSAN_SENTRA_APPS_SPEED_MAP_LEN =

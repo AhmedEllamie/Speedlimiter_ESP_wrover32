@@ -78,8 +78,9 @@
 #ifdef MANUAL
 #include "can_module.h"
 #include "shared_state.h"
+#include "speed_limit_store.h"
+#include "web_server_module.h"
 
-static const uint16_t SPEED_LIMIT_KMH = SPEED_LIMIT_DEFAULT_KMH;
 static const uint8_t SPEED_LIMIT_HYST_KMH = 5;
 
 static bool g_relay_active = false;
@@ -87,6 +88,7 @@ static bool g_relay_active = false;
 static void setRelayActive(bool active) {
   g_relay_active = active;
   digitalWrite(RELAY_PIN, active ? HIGH : LOW);
+  SharedState_SetLimiterActive(active);
 }
 
 void setup() {
@@ -99,23 +101,33 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   setRelayActive(false);
 
+  SpeedLimitStore_Begin();
+  WebServerModule_Begin();
+
   CanModule_Begin();
   CanModule_StartTask();
 }
 
 void loop() {
+  WebServerModule_HandleClient();
+
   uint32_t now = millis();
   bool speed_valid = SharedState_SpeedValid(now, SPEED_TIMEOUT_MS);
+  uint16_t sl_kmh = SharedState_GetSpeedLimitKmh();
 
   if (!speed_valid) {
     if (g_relay_active) {
       setRelayActive(false);
     }
+  } else if (sl_kmh == 0) {
+    // Disabled -> fail-safe relay OFF.
+    if (g_relay_active) setRelayActive(false);
   } else {
     uint8_t speed_kmh = g_speed_kmh;
-    if (!g_relay_active && speed_kmh >= SPEED_LIMIT_KMH) {
+    int32_t off_kmh = (sl_kmh > SPEED_LIMIT_HYST_KMH) ? ((int32_t)sl_kmh - SPEED_LIMIT_HYST_KMH) : 0;
+    if (!g_relay_active && (uint16_t)speed_kmh >= sl_kmh) {
       setRelayActive(true);
-    } else if (g_relay_active && speed_kmh <= (int32_t)SPEED_LIMIT_KMH - SPEED_LIMIT_HYST_KMH) {
+    } else if (g_relay_active && (int32_t)speed_kmh <= off_kmh) {
       setRelayActive(false);
     }
   }
@@ -129,6 +141,8 @@ void loop() {
 #include "can_module.h"
 #include "pwm_module.h"
 #include "logic_module.h"
+#include "speed_limit_store.h"
+#include "web_server_module.h"
 
 void setup() {
   Serial.begin(115200);
@@ -136,6 +150,8 @@ void setup() {
 
   Serial.println("Speed Limiter - Modular Architecture");
   Serial.println("Modules: CAN, ADC, PWM, Logic (algorithm)");
+
+  SpeedLimitStore_Begin();
 
   // Initialize modules (hardware + defaults)
   AdcModule_Begin();
@@ -149,13 +165,16 @@ void setup() {
   PwmModule_StartTask();
   LogicModule_StartTask();
 
+  WebServerModule_Begin();
+
   Serial.println("All modules started");
 }
 
 void loop() {
   // Everything runs in module tasks.
   // Main loop can be used for low-priority tasks or monitoring if needed.
-  delay(1000);
+  WebServerModule_HandleClient();
+  delay(5);
 }
 
 #endif

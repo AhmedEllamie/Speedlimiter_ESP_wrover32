@@ -9,6 +9,12 @@
 extern volatile uint8_t g_speed_kmh;
 extern volatile uint32_t g_speed_last_update_ms;
 
+// Configured speed limit (km/h). 0 = disabled (fail-safe / relay OFF).
+extern volatile uint16_t g_speed_limit_kmh;
+
+// Speed limiter active flag (1 = relay/limiting active, 0 = inactive).
+extern volatile uint8_t g_speed_limiter_active;
+
 // CAN RPM (rpm) + timestamp (ms)
 extern volatile uint16_t g_rpm;
 extern volatile uint32_t g_rpm_last_update_ms;
@@ -27,6 +33,12 @@ extern volatile float g_sdps2_v;
 // -----------------------------------------------------------------------------
 void SharedState_SetSpeed(uint8_t kmh, uint32_t now_ms);
 bool SharedState_SpeedValid(uint32_t now_ms, uint32_t timeout_ms);
+
+void SharedState_SetSpeedLimitKmh(uint16_t kmh);
+uint16_t SharedState_GetSpeedLimitKmh();
+
+void SharedState_SetLimiterActive(bool active);
+bool SharedState_IsLimiterActive();
 
 void SharedState_SetRpm(uint16_t rpm, uint32_t now_ms);
 bool SharedState_RpmValid(uint32_t now_ms, uint32_t timeout_ms);

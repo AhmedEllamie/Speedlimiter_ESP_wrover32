@@ -5,9 +5,9 @@
 #if !BUILD_TEST_LOGGER && !USE_ALGORITHM_MODULE
 
 #include "new_algorithm.h"
+#include "speed_limit_store.h"
 
 #include <Arduino.h>
-#include <Preferences.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -56,8 +56,6 @@ enum class SpeedTrend {
 };
 
 static TaskHandle_t g_logic_task = nullptr;
-static Preferences prefs;
-static uint16_t g_speed_limit_kmh = SPEED_LIMIT_DEFAULT_KMH;
 
 static LimiterState state = LimiterState::PASS_THROUGH;
 static bool relay_active = false;
@@ -107,6 +105,7 @@ static float clampf(float x, float lo, float hi) {
 static void setRelay(bool on) {
   relay_active = on;
   digitalWrite(RELAY_PIN, on ? HIGH : LOW);
+  SharedState_SetLimiterActive(on);
 }
 
 static bool pedalReleased(float in1, float in2) {
@@ -222,15 +221,16 @@ void LogicModule_Begin() {
   pinMode(RELAY_PIN, OUTPUT);
   setRelay(false);
 
-  prefs.begin(PREF_NS, false);
-  g_speed_limit_kmh = prefs.getUShort(PREF_KEY_SL, SPEED_LIMIT_DEFAULT_KMH);
+  // Ensure speed limit is loaded from NVS before the logic task starts.
+  SpeedLimitStore_Begin();
 
   uint32_t now = millis();
   resetLimiter(now);
   last_telemetry_ms = now;
 
-  Serial.printf("LogicModule (new algorithm) ready. SL=%u km/h\r\n", (unsigned)g_speed_limit_kmh);
-  Serial.println("Set speed limit with: SL=<0..250>");
+  uint16_t sl_kmh = SharedState_GetSpeedLimitKmh();
+  Serial.printf("LogicModule (new algorithm) ready. SL=%u km/h\r\n", (unsigned)sl_kmh);
+  Serial.println("Set speed limit via web: /config (WiFi AP)");
 }
 
 static void LogicModule_Update() {
@@ -249,13 +249,16 @@ static void LogicModule_Update() {
   uint8_t speed_kmh = (uint8_t)g_speed_kmh;
   uint32_t speed_update_ms = g_speed_last_update_ms;
 
+  // Snapshot speed limit for this control cycle (avoid mid-cycle changes).
+  uint16_t sl_kmh = SharedState_GetSpeedLimitKmh();
+
   // Trend update + (10) falling detection.
   bool speed_falling = isSpeedFalling(speed_kmh, speed_update_ms);
   bool speed_rising = (last_speed_trend == SpeedTrend::SPEED_RISING);
   bool speed_stable = (last_speed_trend == SpeedTrend::SPEED_STABLE);
 
   // Fail-safe: invalid speed or disabled SL -> relay OFF + pass-through.
-  if (!speed_valid || g_speed_limit_kmh == 0) {
+  if (!speed_valid || sl_kmh == 0) {
     state = LimiterState::PASS_THROUGH;
     setRelay(false);
     aps_cmd_v1 = aps_in_v1;
@@ -268,11 +271,11 @@ static void LogicModule_Update() {
     return;
   }
 
-  uint16_t band_start_kmh = computeBandStartKmh(g_speed_limit_kmh); // (SL - bandSpeed)
+  uint16_t band_start_kmh = computeBandStartKmh(sl_kmh); // (SL - bandSpeed)
   // Start decay near the limit: decayStart = max(bandStart, SL - DECAY_START_BEFORE_SL_KMH).
   uint16_t decay_start_kmh = band_start_kmh;
-  if (g_speed_limit_kmh > DECAY_START_BEFORE_SL_KMH) {
-    uint16_t near_limit = (uint16_t)(g_speed_limit_kmh - DECAY_START_BEFORE_SL_KMH);
+  if (sl_kmh > DECAY_START_BEFORE_SL_KMH) {
+    uint16_t near_limit = (uint16_t)(sl_kmh - DECAY_START_BEFORE_SL_KMH);
     if (near_limit > decay_start_kmh) decay_start_kmh = near_limit;
   }
 
@@ -292,7 +295,7 @@ static void LogicModule_Update() {
         // Prime hold from the table-capped driver demand (so we never increase throttle).
         float apps_table_v1 = DEFAULT_SIGNAL_S1_V;
         float apps_table_v2 = DEFAULT_SIGNAL_S2_V;
-        lookupAppsTableForSpeedLimitKmh(g_speed_limit_kmh, &apps_table_v1, &apps_table_v2);
+        lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2);
 
         float base_v1 = (aps_in_v1 > apps_table_v1) ? apps_table_v1 : aps_in_v1;
         float base_v2 = (aps_in_v2 > apps_table_v2) ? apps_table_v2 : aps_in_v2;
@@ -335,7 +338,7 @@ static void LogicModule_Update() {
       // (2/3) Get APPS table cap for cap_kmh.
       float apps_table_v1 = DEFAULT_SIGNAL_S1_V;
       float apps_table_v2 = DEFAULT_SIGNAL_S2_V;
-      lookupAppsTableForSpeedLimitKmh(g_speed_limit_kmh, &apps_table_v1, &apps_table_v2);
+      lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2);
 
       // (4/5) APS_out = min(APS_in, APPS_table)
       float aps_out_v1 = (aps_in_v1 > apps_table_v1) ? apps_table_v1 : aps_in_v1;
@@ -349,7 +352,7 @@ static void LogicModule_Update() {
       // while speed is rising (or already over the limit).
       bool in_band = ((uint16_t)speed_kmh > band_start_kmh);
       bool in_decay_zone = ((uint16_t)speed_kmh >= decay_start_kmh);
-      bool above_limit = ((uint16_t)speed_kmh > g_speed_limit_kmh);
+      bool above_limit = ((uint16_t)speed_kmh > sl_kmh);
 
       // Prime the timer when entering the decay zone so the first drop can happen immediately.
       if (in_decay_zone && !was_in_decay_zone) {
@@ -367,8 +370,8 @@ static void LogicModule_Update() {
           last_decay_ms = now;
 
           float t = 1.0f;
-          if (g_speed_limit_kmh > decay_start_kmh) {
-            t = (float)((uint16_t)speed_kmh - decay_start_kmh) / (float)(g_speed_limit_kmh - decay_start_kmh);
+          if (sl_kmh > decay_start_kmh) {
+            t = (float)((uint16_t)speed_kmh - decay_start_kmh) / (float)(sl_kmh - decay_start_kmh);
           }
           t = clampf(t, 0.0f, 1.0f);
 
@@ -394,7 +397,7 @@ static void LogicModule_Update() {
       if (aps_cmd_v2 > aps_hold_v2) aps_cmd_v2 = aps_hold_v2;
 
       // (8) When speed is fixed, set APPS_hold = APPS_out.
-      if (speed_stable && (uint16_t)speed_kmh <= g_speed_limit_kmh && in_band) {
+      if (speed_stable && (uint16_t)speed_kmh <= sl_kmh && in_band) {
         aps_hold_v1 = aps_cmd_v1;
         aps_hold_v2 = aps_cmd_v2;
       }
@@ -402,7 +405,7 @@ static void LogicModule_Update() {
       SharedState_SetDesiredOutputs(aps_cmd_v1, aps_cmd_v2);
 
       // (9) If speed within (SL +/- 2) -> LIMIT_ACTIVE.
-      int32_t diff = (int32_t)speed_kmh - (int32_t)g_speed_limit_kmh;
+      int32_t diff = (int32_t)speed_kmh - (int32_t)sl_kmh;
       if (diff >= -(int32_t)LIMIT_ACTIVE_TOLERANCE_KMH && diff <= (int32_t)LIMIT_ACTIVE_TOLERANCE_KMH) {
         state = LimiterState::LIMIT_ACTIVE;
       }
@@ -415,7 +418,7 @@ static void LogicModule_Update() {
       // Keep output <= APPS_hold while still respecting APPS_table and driver demand.
       float apps_table_v1 = DEFAULT_SIGNAL_S1_V;
       float apps_table_v2 = DEFAULT_SIGNAL_S2_V;
-      lookupAppsTableForSpeedLimitKmh(g_speed_limit_kmh, &apps_table_v1, &apps_table_v2);
+      lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2);
 
       float base_v1 = (aps_in_v1 > apps_table_v1) ? apps_table_v1 : aps_in_v1;
       float base_v2 = (aps_in_v2 > apps_table_v2) ? apps_table_v2 : aps_in_v2;
@@ -438,7 +441,7 @@ static void LogicModule_Update() {
       }
 
       // If we drift above SL + tolerance, go back to OVERSHOOT_CONTROL to decay further.
-      int32_t d = (int32_t)speed_kmh - (int32_t)g_speed_limit_kmh;
+      int32_t d = (int32_t)speed_kmh - (int32_t)sl_kmh;
       if (d > (int32_t)LIMIT_ACTIVE_TOLERANCE_KMH) {
         state = LimiterState::OVERSHOOT_CONTROL;
         last_decay_ms = now;
@@ -447,7 +450,7 @@ static void LogicModule_Update() {
       // Decay also in LIMIT_ACTIVE (same conditions / rate limiting).
       bool in_band = ((uint16_t)speed_kmh > band_start_kmh);
       bool in_decay_zone = ((uint16_t)speed_kmh >= decay_start_kmh);
-      bool above_limit = ((uint16_t)speed_kmh > g_speed_limit_kmh);
+      bool above_limit = ((uint16_t)speed_kmh > sl_kmh);
       if (in_decay_zone && !was_in_decay_zone) {
         last_decay_ms = (now >= DECAY_APPLY_INTERVAL_MS) ? (now - DECAY_APPLY_INTERVAL_MS) : 0;
       }
@@ -462,8 +465,8 @@ static void LogicModule_Update() {
           last_decay_ms = now;
 
           float t = 1.0f;
-          if (g_speed_limit_kmh > decay_start_kmh) {
-            t = (float)((uint16_t)speed_kmh - decay_start_kmh) / (float)(g_speed_limit_kmh - decay_start_kmh);
+          if (sl_kmh > decay_start_kmh) {
+            t = (float)((uint16_t)speed_kmh - decay_start_kmh) / (float)(sl_kmh - decay_start_kmh);
           }
           t = clampf(t, 0.0f, 1.0f);
 
@@ -487,7 +490,7 @@ static void LogicModule_Update() {
       if (aps_cmd_v2 > aps_hold_v2) aps_cmd_v2 = aps_hold_v2;
 
       // (8) When speed is fixed (and not overspeeding), lock the hold to the output.
-      if (speed_stable && (uint16_t)speed_kmh <= g_speed_limit_kmh && (uint16_t)speed_kmh > band_start_kmh) {
+      if (speed_stable && (uint16_t)speed_kmh <= sl_kmh && (uint16_t)speed_kmh > band_start_kmh) {
         aps_hold_v1 = aps_cmd_v1;
         aps_hold_v2 = aps_cmd_v2;
       }
@@ -511,12 +514,12 @@ static void LogicModule_Update() {
 
     float apps_table_v1 = DEFAULT_SIGNAL_S1_V;
     float apps_table_v2 = DEFAULT_SIGNAL_S2_V;
-    lookupAppsTableForSpeedLimitKmh(g_speed_limit_kmh, &apps_table_v1, &apps_table_v2);
+    lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2);
 
     Serial.printf(
         "SPD=%u SL=%u bandStart=%u decayStart=%u State=%d Trend=%d APSin=(%.2f,%.2f) APScap=(%.2f,%.2f) APShold=(%.2f,%.2f) APSout=(%.2f,%.2f) Relay=%d\r\n",
         (unsigned)speed_kmh,
-        (unsigned)g_speed_limit_kmh,
+        (unsigned)sl_kmh,
         (unsigned)band_start_kmh,
         (unsigned)decay_start_kmh,
         (int)state,
