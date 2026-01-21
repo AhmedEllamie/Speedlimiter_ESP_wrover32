@@ -74,7 +74,7 @@
 // Logger firmware (defines its own setup()/loop()).
 #include "test_logger_fw.h"
 #else
-
+#define MANUAL 1
 #ifdef MANUAL
 #include "can_module.h"
 #include "shared_state.h"
@@ -84,11 +84,27 @@
 static const uint8_t SPEED_LIMIT_HYST_KMH = 5;
 
 static bool g_relay_active = false;
+static uint32_t g_last_relay_change_ms = 0;
 
-static void setRelayActive(bool active) {
-  g_relay_active = active;
-  digitalWrite(RELAY_PIN, active ? HIGH : LOW);
-  SharedState_SetLimiterActive(active);
+static void setRelayActive(bool active, bool force = false) {
+  uint32_t now = millis();
+
+  // Enforce minimum time between ANY relay state changes (anti-chatter).
+  if (!force && (active != g_relay_active) && g_last_relay_change_ms != 0) {
+    uint32_t elapsed_ms = (uint32_t)(now - g_last_relay_change_ms);
+    if (elapsed_ms < RELAY_MIN_CHANGE_INTERVAL_MS) {
+      // Too soon: keep current relay state.
+      active = g_relay_active;
+    }
+  }
+
+  if (active != g_relay_active) {
+    g_relay_active = active;
+    g_last_relay_change_ms = now;
+  }
+
+  digitalWrite(RELAY_PIN, g_relay_active ? HIGH : LOW);
+  SharedState_SetLimiterActive(g_relay_active);
 }
 
 void setup() {
@@ -117,11 +133,11 @@ void loop() {
 
   if (!speed_valid) {
     if (g_relay_active) {
-      setRelayActive(false);
+      setRelayActive(false, true);
     }
   } else if (sl_kmh == 0) {
     // Disabled -> fail-safe relay OFF.
-    if (g_relay_active) setRelayActive(false);
+    if (g_relay_active) setRelayActive(false, true);
   } else {
     uint8_t speed_kmh = g_speed_kmh;
     int32_t off_kmh = (sl_kmh > SPEED_LIMIT_HYST_KMH) ? ((int32_t)sl_kmh - SPEED_LIMIT_HYST_KMH) : 0;

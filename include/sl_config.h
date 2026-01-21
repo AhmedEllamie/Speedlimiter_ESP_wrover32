@@ -110,6 +110,10 @@ static const uint16_t PEDAL_RELEASE_MARGIN_MV = 100; // ~100 mV below captured -
 static const uint32_t CONTROL_INTERVAL_MS = 50;
 //static const float SPEED_DEADBAND_KMH = 0.3f;
 
+// Relay anti-chatter: minimum time between ANY relay state changes.
+// This protects the relay from fast ON/OFF toggling due to noisy thresholds.
+static const uint32_t RELAY_MIN_CHANGE_INTERVAL_MS = 2000;
+
 // -------------------------- Limiter controller tuning --------------------------
 // This is a SPEED LIMITER (not cruise control):
 // - Reduce throttle quickly when overspeed is predicted.

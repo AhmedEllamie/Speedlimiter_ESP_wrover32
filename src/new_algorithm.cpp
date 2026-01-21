@@ -36,6 +36,8 @@ static constexpr uint8_t DECAY_START_BEFORE_SL_KMH = 4;
 static constexpr float DECAY_RATE_MIN_PER_S = 0.001f;       // gentle cut at band start
 static constexpr float DECAY_RATE_MAX_PER_S = 0.005f;       // stronger cut near SL
 static constexpr float DECAY_RATE_OVERSPEED_PER_S = 0.060f; // cut when already above SL
+// Do not decay below: APPS_table - 30% (i.e. 70% of APPS_table).
+static constexpr float DECAY_FLOOR_FROM_APPS_TABLE_FACTOR = 0.70f;
 // Rate-limit decay updates so APSout doesn't change too frequently.
 // Example: 3000ms -> ~1 change per 3 seconds.
 static constexpr uint32_t DECAY_APPLY_INTERVAL_MS = 5000;
@@ -59,6 +61,7 @@ static TaskHandle_t g_logic_task = nullptr;
 
 static LimiterState state = LimiterState::PASS_THROUGH;
 static bool relay_active = false;
+static uint32_t last_relay_change_ms = 0;
 
 // Outputs (ECU-level volts)
 static float aps_cmd_v1 = DEFAULT_SIGNAL_S1_V;
@@ -102,10 +105,25 @@ static float clampf(float x, float lo, float hi) {
   return x;
 }
 
-static void setRelay(bool on) {
-  relay_active = on;
-  digitalWrite(RELAY_PIN, on ? HIGH : LOW);
-  SharedState_SetLimiterActive(on);
+static void setRelay(bool on, bool force = false) {
+  uint32_t now = millis();
+
+  // Enforce minimum time between ANY relay state changes (anti-chatter).
+  if (!force && (on != relay_active) && last_relay_change_ms != 0) {
+    uint32_t elapsed_ms = (uint32_t)(now - last_relay_change_ms);
+    if (elapsed_ms < RELAY_MIN_CHANGE_INTERVAL_MS) {
+      // Too soon: keep current relay state.
+      on = relay_active;
+    }
+  }
+
+  if (on != relay_active) {
+    relay_active = on;
+    last_relay_change_ms = now;
+  }
+
+  digitalWrite(RELAY_PIN, relay_active ? HIGH : LOW);
+  SharedState_SetLimiterActive(relay_active);
 }
 
 static bool pedalReleased(float in1, float in2) {
@@ -260,7 +278,7 @@ static void LogicModule_Update() {
   // Fail-safe: invalid speed or disabled SL -> relay OFF + pass-through.
   if (!speed_valid || sl_kmh == 0) {
     state = LimiterState::PASS_THROUGH;
-    setRelay(false);
+    setRelay(false, true);
     aps_cmd_v1 = aps_in_v1;
     aps_cmd_v2 = aps_in_v2;
     aps_hold_v1 = aps_in_v1;
@@ -339,6 +357,8 @@ static void LogicModule_Update() {
       float apps_table_v1 = DEFAULT_SIGNAL_S1_V;
       float apps_table_v2 = DEFAULT_SIGNAL_S2_V;
       lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2);
+      float apps_floor_v1 = maxf(apps_table_v1 * DECAY_FLOOR_FROM_APPS_TABLE_FACTOR, DEFAULT_SIGNAL_S1_V);
+      float apps_floor_v2 = maxf(apps_table_v2 * DECAY_FLOOR_FROM_APPS_TABLE_FACTOR, DEFAULT_SIGNAL_S2_V);
 
       // (4/5) APS_out = min(APS_in, APPS_table)
       float aps_out_v1 = (aps_in_v1 > apps_table_v1) ? apps_table_v1 : aps_in_v1;
@@ -385,8 +405,8 @@ static void LogicModule_Update() {
           aps_hold_v1 *= scale;
           aps_hold_v2 *= scale;
 
-          if (aps_hold_v1 < DEFAULT_SIGNAL_S1_V) aps_hold_v1 = DEFAULT_SIGNAL_S1_V;
-          if (aps_hold_v2 < DEFAULT_SIGNAL_S2_V) aps_hold_v2 = DEFAULT_SIGNAL_S2_V;
+          if (aps_hold_v1 < apps_floor_v1) aps_hold_v1 = apps_floor_v1;
+          if (aps_hold_v2 < apps_floor_v2) aps_hold_v2 = apps_floor_v2;
         }
       }
 
@@ -419,6 +439,8 @@ static void LogicModule_Update() {
       float apps_table_v1 = DEFAULT_SIGNAL_S1_V;
       float apps_table_v2 = DEFAULT_SIGNAL_S2_V;
       lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2);
+      float apps_floor_v1 = maxf(apps_table_v1 * DECAY_FLOOR_FROM_APPS_TABLE_FACTOR, DEFAULT_SIGNAL_S1_V);
+      float apps_floor_v2 = maxf(apps_table_v2 * DECAY_FLOOR_FROM_APPS_TABLE_FACTOR, DEFAULT_SIGNAL_S2_V);
 
       float base_v1 = (aps_in_v1 > apps_table_v1) ? apps_table_v1 : aps_in_v1;
       float base_v2 = (aps_in_v2 > apps_table_v2) ? apps_table_v2 : aps_in_v2;
@@ -479,8 +501,8 @@ static void LogicModule_Update() {
           aps_hold_v1 *= scale;
           aps_hold_v2 *= scale;
 
-          if (aps_hold_v1 < DEFAULT_SIGNAL_S1_V) aps_hold_v1 = DEFAULT_SIGNAL_S1_V;
-          if (aps_hold_v2 < DEFAULT_SIGNAL_S2_V) aps_hold_v2 = DEFAULT_SIGNAL_S2_V;
+          if (aps_hold_v1 < apps_floor_v1) aps_hold_v1 = apps_floor_v1;
+          if (aps_hold_v2 < apps_floor_v2) aps_hold_v2 = apps_floor_v2;
         }
       }
 

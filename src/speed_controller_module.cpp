@@ -103,7 +103,28 @@ struct SpeedControllerState {
 
 static SpeedControllerState st;
 
-static void setRelayActive(bool active) { digitalWrite(RELAY_PIN, active ? HIGH : LOW); }
+static bool g_relay_out_active = false;
+static uint32_t g_last_relay_change_ms = 0;
+
+static void setRelayActive(bool active, bool force = false) {
+  uint32_t now = millis();
+
+  // Enforce minimum time between ANY relay state changes (anti-chatter).
+  if (!force && (active != g_relay_out_active) && g_last_relay_change_ms != 0) {
+    uint32_t elapsed_ms = (uint32_t)(now - g_last_relay_change_ms);
+    if (elapsed_ms < RELAY_MIN_CHANGE_INTERVAL_MS) {
+      // Too soon: keep current relay state.
+      active = g_relay_out_active;
+    }
+  }
+
+  if (active != g_relay_out_active) {
+    g_relay_out_active = active;
+    g_last_relay_change_ms = now;
+  }
+
+  digitalWrite(RELAY_PIN, g_relay_out_active ? HIGH : LOW);
+}
 
 static void applySpeedLimitFromCli(const char *line) {
   if (!line) return;
@@ -182,11 +203,12 @@ static void updateSpeedDerivative(uint8_t speed_kmh, uint32_t speed_update_ms) {
 }
 
 static void publishOutputsAndRelay(const LinkedInputs &in) {
+  bool force_off = (!in.speed_valid || s_speed_limit_kmh == 0);
   if (st.active) {
     setRelayActive(true);
     SharedState_SetDesiredOutputs(st.aps1_out_v, st.aps2_out_v);
   } else {
-    setRelayActive(false);
+    setRelayActive(false, force_off);
     // Pass-through (still publish for visibility / PWM alignment)
     SharedState_SetDesiredOutputs(in.aps1_in_v, in.aps2_in_v);
   }
