@@ -75,7 +75,7 @@ static const uint32_t SPEED_TIMEOUT_MS = 500;
 // -----------------------------------------------------------------------------
 static const char *PREF_NS = "speedLimiter";
 static const char *PREF_KEY_SL = "sl"; // speed limit in km/h
-static const uint16_t SPEED_LIMIT_DEFAULT_KMH = 55;
+static const uint16_t SPEED_LIMIT_DEFAULT_KMH = 50;
 
 // -----------------------------------------------------------------------------
 // Dashboard/CAN gap compensation

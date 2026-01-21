@@ -69,6 +69,7 @@
 
 #include "sl_config.h"
 
+
 #if BUILD_TEST_LOGGER
 // Logger firmware (defines its own setup()/loop()).
 #include "test_logger_fw.h"
