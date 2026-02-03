@@ -1,3 +1,7 @@
+/**
+ * Author: Ahmed Ellamiee
+ * Email:  ahmed.ellamiee@gmail.com
+ */
 #include "speed_controller_module.h"
 
 #include "sl_config.h"

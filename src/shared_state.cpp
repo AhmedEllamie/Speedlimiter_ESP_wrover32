@@ -1,3 +1,7 @@
+/**
+ * Author: Ahmed Ellamiee
+ * Email:  ahmed.ellamiee@gmail.com
+ */
 #include "shared_state.h"
 
 #include "freertos/FreeRTOS.h"

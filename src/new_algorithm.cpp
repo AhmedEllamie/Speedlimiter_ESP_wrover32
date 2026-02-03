@@ -1,3 +1,7 @@
+/**
+ * Author: Ahmed Ellamiee
+ * Email:  ahmed.ellamiee@gmail.com
+ */
 #include "logic_module.h"
 #include "shared_state.h"
 #include "sl_config.h"

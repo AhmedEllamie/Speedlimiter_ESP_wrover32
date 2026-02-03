@@ -1,3 +1,7 @@
+/**
+ * Author: Ahmed Ellamiee
+ * Email:  ahmed.ellamiee@gmail.com
+ */
 #include "web_server_module.h"
 
 #if !BUILD_TEST_LOGGER

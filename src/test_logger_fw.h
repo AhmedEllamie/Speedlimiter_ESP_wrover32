@@ -1,3 +1,7 @@
+/**
+ * Author: Ahmed Ellamiee
+ * Email:  ahmed.ellamiee@gmail.com
+ */
 // Logger firmware (compiled only when BUILD_TEST_LOGGER=1)
 //
 // Implements:
