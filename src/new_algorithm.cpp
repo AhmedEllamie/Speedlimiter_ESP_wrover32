@@ -36,8 +36,10 @@ static constexpr uint8_t DECAY_START_BEFORE_SL_KMH = 4;
 static constexpr float DECAY_RATE_MIN_PER_S = 0.001f;       // gentle cut at band start
 static constexpr float DECAY_RATE_MAX_PER_S = 0.005f;       // stronger cut near SL
 static constexpr float DECAY_RATE_OVERSPEED_PER_S = 0.060f; // cut when already above SL
-// Do not decay below: APPS_table - 30% (i.e. 70% of APPS_table).
-static constexpr float DECAY_FLOOR_FROM_APPS_TABLE_FACTOR = 0.70f;
+// Do not decay below:
+//   APPS_floor = APPS_table(now) - (APPS_table(now) - APPS_table(prev_point)) * 30%
+// Where "prev_point" is the table point just below the current speed-limit bracket.
+static constexpr float DECAY_FLOOR_FROM_PREV_DELTA_FACTOR = 0.30f;
 // Rate-limit decay updates so APSout doesn't change too frequently.
 // Example: 3000ms -> ~1 change per 3 seconds.
 static constexpr uint32_t DECAY_APPLY_INTERVAL_MS = 5000;
@@ -159,12 +161,18 @@ static bool isSpeedFalling(uint8_t speed_kmh, uint32_t speed_update_ms) {
 }
 
 // (2) APPS table lookup based on the configured speed limit (km/h).
-static void lookupAppsTableForSpeedLimitKmh(uint16_t speed_limit_kmh, float *out_v1, float *out_v2) {
+static void lookupAppsTableForSpeedLimitKmh(uint16_t speed_limit_kmh,
+                                            float *out_v1,
+                                            float *out_v2,
+                                            float *out_prev_v1 = nullptr,
+                                            float *out_prev_v2 = nullptr) {
   if (!out_v1 || !out_v2) return;
 
   if (NISSAN_SENTRA_APPS_SPEED_MAP_LEN == 0) {
     *out_v1 = DEFAULT_SIGNAL_S1_V;
     *out_v2 = DEFAULT_SIGNAL_S2_V;
+    if (out_prev_v1) *out_prev_v1 = *out_v1;
+    if (out_prev_v2) *out_prev_v2 = *out_v2;
     return;
   }
 
@@ -175,6 +183,9 @@ static void lookupAppsTableForSpeedLimitKmh(uint16_t speed_limit_kmh, float *out
     clampPairToMaxEcuV(out_v1, out_v2);
     *out_v1 = maxf(*out_v1, DEFAULT_SIGNAL_S1_V);
     *out_v2 = maxf(*out_v2, DEFAULT_SIGNAL_S2_V);
+    // No previous point exists: treat "prev" as the same point.
+    if (out_prev_v1) *out_prev_v1 = *out_v1;
+    if (out_prev_v2) *out_prev_v2 = *out_v2;
     return;
   }
 
@@ -185,6 +196,20 @@ static void lookupAppsTableForSpeedLimitKmh(uint16_t speed_limit_kmh, float *out
     clampPairToMaxEcuV(out_v1, out_v2);
     *out_v1 = maxf(*out_v1, DEFAULT_SIGNAL_S1_V);
     *out_v2 = maxf(*out_v2, DEFAULT_SIGNAL_S2_V);
+
+    // Previous point is the entry before the last (if it exists).
+    float pv1 = *out_v1;
+    float pv2 = *out_v2;
+    if (NISSAN_SENTRA_APPS_SPEED_MAP_LEN >= 2) {
+      const NissanSentraAppsMapPoint &prev = NISSAN_SENTRA_APPS_SPEED_MAP[NISSAN_SENTRA_APPS_SPEED_MAP_LEN - 2];
+      pv1 = mvToVolts(prev.aps1_mv);
+      pv2 = mvToVolts(prev.aps2_mv);
+      clampPairToMaxEcuV(&pv1, &pv2);
+      pv1 = maxf(pv1, DEFAULT_SIGNAL_S1_V);
+      pv2 = maxf(pv2, DEFAULT_SIGNAL_S2_V);
+    }
+    if (out_prev_v1) *out_prev_v1 = pv1;
+    if (out_prev_v2) *out_prev_v2 = pv2;
     return;
   }
 
@@ -205,6 +230,15 @@ static void lookupAppsTableForSpeedLimitKmh(uint16_t speed_limit_kmh, float *out
       clampPairToMaxEcuV(out_v1, out_v2);
       *out_v1 = maxf(*out_v1, DEFAULT_SIGNAL_S1_V);
       *out_v2 = maxf(*out_v2, DEFAULT_SIGNAL_S2_V);
+
+      // Previous point is the lower bracket point `a`.
+      float pv1 = mvToVolts(a.aps1_mv);
+      float pv2 = mvToVolts(a.aps2_mv);
+      clampPairToMaxEcuV(&pv1, &pv2);
+      pv1 = maxf(pv1, DEFAULT_SIGNAL_S1_V);
+      pv2 = maxf(pv2, DEFAULT_SIGNAL_S2_V);
+      if (out_prev_v1) *out_prev_v1 = pv1;
+      if (out_prev_v2) *out_prev_v2 = pv2;
       return;
     }
   }
@@ -217,6 +251,9 @@ static void lookupAppsTableForSpeedLimitKmh(uint16_t speed_limit_kmh, float *out
   // Safety floors.
   *out_v1 = maxf(*out_v1, DEFAULT_SIGNAL_S1_V);
   *out_v2 = maxf(*out_v2, DEFAULT_SIGNAL_S2_V);
+
+  if (out_prev_v1) *out_prev_v1 = *out_v1;
+  if (out_prev_v2) *out_prev_v2 = *out_v2;
 }
 
 static void resetLimiter(uint32_t now_ms) {
@@ -356,9 +393,14 @@ static void LogicModule_Update() {
       // (2/3) Get APPS table cap for cap_kmh.
       float apps_table_v1 = DEFAULT_SIGNAL_S1_V;
       float apps_table_v2 = DEFAULT_SIGNAL_S2_V;
-      lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2);
-      float apps_floor_v1 = maxf(apps_table_v1 * DECAY_FLOOR_FROM_APPS_TABLE_FACTOR, DEFAULT_SIGNAL_S1_V);
-      float apps_floor_v2 = maxf(apps_table_v2 * DECAY_FLOOR_FROM_APPS_TABLE_FACTOR, DEFAULT_SIGNAL_S2_V);
+      float apps_prev_v1 = DEFAULT_SIGNAL_S1_V;
+      float apps_prev_v2 = DEFAULT_SIGNAL_S2_V;
+      lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2, &apps_prev_v1, &apps_prev_v2);
+
+      float apps_floor_v1 = apps_table_v1 - (apps_table_v1 - apps_prev_v1) * DECAY_FLOOR_FROM_PREV_DELTA_FACTOR;
+      float apps_floor_v2 = apps_table_v2 - (apps_table_v2 - apps_prev_v2) * DECAY_FLOOR_FROM_PREV_DELTA_FACTOR;
+      apps_floor_v1 = clampf(apps_floor_v1, DEFAULT_SIGNAL_S1_V, apps_table_v1);
+      apps_floor_v2 = clampf(apps_floor_v2, DEFAULT_SIGNAL_S2_V, apps_table_v2);
 
       // (4/5) APS_out = min(APS_in, APPS_table)
       float aps_out_v1 = (aps_in_v1 > apps_table_v1) ? apps_table_v1 : aps_in_v1;
@@ -438,9 +480,14 @@ static void LogicModule_Update() {
       // Keep output <= APPS_hold while still respecting APPS_table and driver demand.
       float apps_table_v1 = DEFAULT_SIGNAL_S1_V;
       float apps_table_v2 = DEFAULT_SIGNAL_S2_V;
-      lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2);
-      float apps_floor_v1 = maxf(apps_table_v1 * DECAY_FLOOR_FROM_APPS_TABLE_FACTOR, DEFAULT_SIGNAL_S1_V);
-      float apps_floor_v2 = maxf(apps_table_v2 * DECAY_FLOOR_FROM_APPS_TABLE_FACTOR, DEFAULT_SIGNAL_S2_V);
+      float apps_prev_v1 = DEFAULT_SIGNAL_S1_V;
+      float apps_prev_v2 = DEFAULT_SIGNAL_S2_V;
+      lookupAppsTableForSpeedLimitKmh(sl_kmh, &apps_table_v1, &apps_table_v2, &apps_prev_v1, &apps_prev_v2);
+
+      float apps_floor_v1 = apps_table_v1 - (apps_table_v1 - apps_prev_v1) * DECAY_FLOOR_FROM_PREV_DELTA_FACTOR;
+      float apps_floor_v2 = apps_table_v2 - (apps_table_v2 - apps_prev_v2) * DECAY_FLOOR_FROM_PREV_DELTA_FACTOR;
+      apps_floor_v1 = clampf(apps_floor_v1, DEFAULT_SIGNAL_S1_V, apps_table_v1);
+      apps_floor_v2 = clampf(apps_floor_v2, DEFAULT_SIGNAL_S2_V, apps_table_v2);
 
       float base_v1 = (aps_in_v1 > apps_table_v1) ? apps_table_v1 : aps_in_v1;
       float base_v2 = (aps_in_v2 > apps_table_v2) ? apps_table_v2 : aps_in_v2;

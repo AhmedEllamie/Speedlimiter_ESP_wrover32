@@ -74,7 +74,7 @@
 // Logger firmware (defines its own setup()/loop()).
 #include "test_logger_fw.h"
 #else
-#define MANUAL 1
+
 #ifdef MANUAL
 #include "can_module.h"
 #include "shared_state.h"
