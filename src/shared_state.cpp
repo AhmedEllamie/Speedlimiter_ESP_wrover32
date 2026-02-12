@@ -16,6 +16,10 @@ volatile uint16_t g_speed_limit_kmh = 0;
 // 1 = active (relay ON / limiting), 0 = inactive.
 volatile uint8_t g_speed_limiter_active = 0;
 
+// Manual override flags (used in MANUAL mode for relay control).
+volatile uint8_t g_manual_override_enabled = 0;
+volatile uint8_t g_manual_override_relay_on = 0;
+
 volatile uint16_t g_rpm = 0;
 volatile uint32_t g_rpm_last_update_ms = 0;
 
@@ -63,6 +67,32 @@ void SharedState_SetLimiterActive(bool active) {
 bool SharedState_IsLimiterActive() {
   portENTER_CRITICAL(&g_state_mux);
   bool v = (g_speed_limiter_active != 0);
+  portEXIT_CRITICAL(&g_state_mux);
+  return v;
+}
+
+void SharedState_SetManualOverrideEnabled(bool enabled) {
+  portENTER_CRITICAL(&g_state_mux);
+  g_manual_override_enabled = enabled ? 1 : 0;
+  portEXIT_CRITICAL(&g_state_mux);
+}
+
+bool SharedState_GetManualOverrideEnabled() {
+  portENTER_CRITICAL(&g_state_mux);
+  bool v = (g_manual_override_enabled != 0);
+  portEXIT_CRITICAL(&g_state_mux);
+  return v;
+}
+
+void SharedState_SetManualOverrideRelay(bool on) {
+  portENTER_CRITICAL(&g_state_mux);
+  g_manual_override_relay_on = on ? 1 : 0;
+  portEXIT_CRITICAL(&g_state_mux);
+}
+
+bool SharedState_GetManualOverrideRelay() {
+  portENTER_CRITICAL(&g_state_mux);
+  bool v = (g_manual_override_relay_on != 0);
   portEXIT_CRITICAL(&g_state_mux);
   return v;
 }

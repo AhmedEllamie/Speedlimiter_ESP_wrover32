@@ -19,6 +19,12 @@ extern volatile uint16_t g_speed_limit_kmh;
 // Speed limiter active flag (1 = relay/limiting active, 0 = inactive).
 extern volatile uint8_t g_speed_limiter_active;
 
+// Manual override for relay (MANUAL mode only, safe to ignore elsewhere).
+// When enabled, logic code may choose to honor g_manual_override_relay_on
+// instead of automatic control.
+extern volatile uint8_t g_manual_override_enabled;
+extern volatile uint8_t g_manual_override_relay_on;
+
 // CAN RPM (rpm) + timestamp (ms)
 extern volatile uint16_t g_rpm;
 extern volatile uint32_t g_rpm_last_update_ms;
@@ -43,6 +49,12 @@ uint16_t SharedState_GetSpeedLimitKmh();
 
 void SharedState_SetLimiterActive(bool active);
 bool SharedState_IsLimiterActive();
+
+// Manual relay override accessors (used primarily in MANUAL build).
+void SharedState_SetManualOverrideEnabled(bool enabled);
+bool SharedState_GetManualOverrideEnabled();
+void SharedState_SetManualOverrideRelay(bool on);
+bool SharedState_GetManualOverrideRelay();
 
 void SharedState_SetRpm(uint16_t rpm, uint32_t now_ms);
 bool SharedState_RpmValid(uint32_t now_ms, uint32_t timeout_ms);

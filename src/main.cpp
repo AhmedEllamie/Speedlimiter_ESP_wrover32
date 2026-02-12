@@ -121,6 +121,10 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   setRelayActive(false);
 
+   // Default manual override state: disabled, relay OFF.
+   SharedState_SetManualOverrideEnabled(false);
+   SharedState_SetManualOverrideRelay(false);
+
   SpeedLimitStore_Begin();
   WebServerModule_Begin();
 
@@ -131,6 +135,14 @@ void setup() {
 void loop() {
   WebServerModule_HandleClient();
 
+  // If admin override is enabled, honor the requested relay state from the web UI
+  // and skip automatic speed/limit logic until override is disabled again.
+  bool override_enabled = SharedState_GetManualOverrideEnabled();
+  bool override_relay_on = SharedState_GetManualOverrideRelay();
+
+  if (override_enabled) {
+    setRelayActive(override_relay_on);
+  } else {
   uint32_t now = millis();
   bool speed_valid = SharedState_SpeedValid(now, SPEED_TIMEOUT_MS);
   uint16_t sl_kmh = SharedState_GetSpeedLimitKmh();
@@ -150,6 +162,7 @@ void loop() {
     } else if (g_relay_active && (int32_t)speed_kmh <= off_kmh) {
       setRelayActive(false);
     }
+  }
   }
 
   delay(20);

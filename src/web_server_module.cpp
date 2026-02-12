@@ -104,6 +104,14 @@ static void handleApiStatus() {
   json += ",";
   json += "\"active\":";
   json += active ? "true" : "false";
+#ifdef MANUAL
+  json += ",";
+  json += "\"manual_override\":";
+  json += SharedState_GetManualOverrideEnabled() ? "true" : "false";
+  json += ",";
+  json += "\"manual_override_relay_on\":";
+  json += SharedState_GetManualOverrideRelay() ? "true" : "false";
+#endif
   json += "}";
 
   s_server.sendHeader("Cache-Control", "no-store");
@@ -132,6 +140,21 @@ static void handleStatusPage() {
   html += "<div class='card'><div class='label'>Speed Limiter</div><div class='value'>";
   html += active ? "<span class='ok'>ACTIVE</span>" : "<span class='warn'>INACTIVE</span>";
   html += "</div></div>";
+
+#ifdef MANUAL
+  // Manual override summary (MANUAL build only).
+  bool override_enabled = SharedState_GetManualOverrideEnabled();
+  bool override_relay_on = SharedState_GetManualOverrideRelay();
+
+  html += "<div class='card'><div class='label'>Manual Override</div><div class='value'>";
+  if (override_enabled) {
+    html += override_relay_on ? "<span class='ok'>ENABLED (RELAY ON)</span>"
+                              : "<span class='warn'>ENABLED (RELAY OFF)</span>";
+  } else {
+    html += "<span class='muted'>DISABLED</span>";
+  }
+  html += "</div></div>";
+#endif
 
   html += "</div>";
 
@@ -176,6 +199,42 @@ static void handleConfigPage() {
           "</form>"
           "</div>";
 
+#ifdef MANUAL
+  // Manual override controls (only in MANUAL build).
+  bool override_enabled = SharedState_GetManualOverrideEnabled();
+  bool override_relay_on = SharedState_GetManualOverrideRelay();
+
+  html += "<div class='card'>"
+          "<div class='label'>Manual Relay Override</div>"
+          "<div class='muted'>When enabled, the relay is controlled directly from this page and ignores speed logic.</div>"
+          "<div class='muted'>Status: <strong>";
+  html += override_enabled ? "ENABLED" : "DISABLED";
+  html += "</strong> &nbsp; Relay: <strong>";
+  html += override_relay_on ? "ON" : "OFF";
+  html += "</strong></div>"
+          "<form action='/override' method='post' style='margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;'>"
+          "<input type='hidden' name='enabled' value='";
+  html += override_enabled ? "0" : "1";
+  html += "'>"
+          "<button type='submit'>";
+  html += override_enabled ? "Disable Override" : "Enable Override";
+  html += "</button>"
+          "</form>";
+
+  if (override_enabled) {
+    html += "<form action='/override_relay' method='post' style='margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;'>"
+            "<input type='hidden' name='state' value='on'>"
+            "<button type='submit'>Relay ON</button>"
+            "</form>";
+    html += "<form action='/override_relay' method='post' style='margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;'>"
+            "<input type='hidden' name='state' value='off'>"
+            "<button type='submit'>Relay OFF</button>"
+            "</form>";
+  }
+
+  html += "</div>";
+#endif
+
   html += htmlPageFooter();
   sendHtml(200, html);
 }
@@ -206,6 +265,39 @@ static void handleResetSpeedLimit() {
   redirectToConfig();
 }
 
+#ifdef MANUAL
+static void handleManualOverride() {
+  if (!s_server.hasArg("enabled")) {
+    s_server.send(400, "text/plain", "Missing field: enabled");
+    return;
+  }
+
+  String v = s_server.arg("enabled");
+  bool enabled = (v == "1" || v == "on" || v == "ON" || v == "true" || v == "TRUE");
+
+  SharedState_SetManualOverrideEnabled(enabled);
+  if (!enabled) {
+    // When disabling override, default the requested manual relay state to OFF.
+    SharedState_SetManualOverrideRelay(false);
+  }
+
+  redirectToConfig();
+}
+
+static void handleManualOverrideRelay() {
+  if (!s_server.hasArg("state")) {
+    s_server.send(400, "text/plain", "Missing field: state");
+    return;
+  }
+
+  String v = s_server.arg("state");
+  bool on = (v == "1" || v == "on" || v == "ON" || v == "true" || v == "TRUE");
+
+  SharedState_SetManualOverrideRelay(on);
+  redirectToConfig();
+}
+#endif
+
 static void handleNotFound() { s_server.send(404, "text/plain", "Not found"); }
 
 void WebServerModule_Begin() {
@@ -228,6 +320,10 @@ void WebServerModule_Begin() {
   s_server.on("/api/status", HTTP_GET, handleApiStatus);
   s_server.on("/set", HTTP_POST, handleSetSpeedLimit);
   s_server.on("/reset", HTTP_POST, handleResetSpeedLimit);
+#ifdef MANUAL
+  s_server.on("/override", HTTP_POST, handleManualOverride);
+  s_server.on("/override_relay", HTTP_POST, handleManualOverrideRelay);
+#endif
   s_server.onNotFound(handleNotFound);
 
   s_server.begin();

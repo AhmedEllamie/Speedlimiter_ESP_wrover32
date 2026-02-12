@@ -43,7 +43,7 @@ static constexpr float DECAY_RATE_OVERSPEED_PER_S = 0.060f; // cut when already 
 // Do not decay below:
 //   APPS_floor = APPS_table(now) - (APPS_table(now) - APPS_table(prev_point)) * 30%
 // Where "prev_point" is the table point just below the current speed-limit bracket.
-static constexpr float DECAY_FLOOR_FROM_PREV_DELTA_FACTOR = 0.30f;
+static constexpr float DECAY_FLOOR_FROM_PREV_DELTA_FACTOR = 0.50f;
 // Rate-limit decay updates so APSout doesn't change too frequently.
 // Example: 3000ms -> ~1 change per 3 seconds.
 static constexpr uint32_t DECAY_APPLY_INTERVAL_MS = 5000;

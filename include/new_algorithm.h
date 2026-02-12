@@ -24,7 +24,7 @@ struct NissanSentraAppsMapPoint {
 
 static constexpr NissanSentraAppsMapPoint NISSAN_SENTRA_APPS_SPEED_MAP[] = {
     // speed_kmh, aps1_mv, aps2_mv
-    {10, 350, 700},
+    {10, 400, 780},
     {20, 450, 850},
     {30, 480, 900},
     {40, 500, 970},
